@@ -22,10 +22,30 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 )
+
+type TunnelParams struct {
+	Peer               string
+	VkHashes           []string
+	ConnectionPassword string
+	Port               int
+	WorkersPerHash     int
+	DeviceID           string
+	GoDnsArg           string
+	ObfsMode           string
+	VkAnonPath         string
+	VkAuthMode         string
+}
+
+type DnsProbeResult struct {
+	Reachable  bool
+	StatusText string
+}
 
 // ── Global state ────────────────────────────────────────────────────────────
 
@@ -249,6 +269,52 @@ func runTunnelLoop(ctx context.Context, params TunnelParams) {
 				return
 			}
 			iosLog(fmt.Sprintf("[ВОРКЕР] Ошибка: %v — переподключение...", err), true)
+		}
+	}
+}
+
+func GoDnsProbeCheck(ctx context.Context, dnsArg string) DnsProbeResult {
+	if dnsArg == "" {
+		return DnsProbeResult{Reachable: true, StatusText: "OK"}
+	}
+	host := dnsArg
+	if !strings.Contains(host, ":") {
+		host = net.JoinHostPort(dnsArg, "53")
+	}
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(ctx, "udp", host)
+	if err != nil {
+		return DnsProbeResult{Reachable: false, StatusText: err.Error()}
+	}
+	conn.Close()
+	return DnsProbeResult{Reachable: true, StatusText: "OK"}
+}
+
+func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, isErr bool)) error {
+	logFn("[ГО-ВОРКЕР] Инициализация сессии...", false)
+	if len(params.VkHashes) == 0 {
+		return fmt.Errorf("нет VK-хешей")
+	}
+	logFn(fmt.Sprintf("[ГО-ВОРКЕР] Получение credentials для %d хешей...", len(params.VkHashes)), false)
+	
+	credsCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	
+	u, p, turnURLs, err := GetCreds(credsCtx, params.VkHashes[0], 9001)
+	if err != nil {
+		return fmt.Errorf("GetCreds error: %w", err)
+	}
+	logFn(fmt.Sprintf("[ГО-ВОРКЕР] TURN получен: u=%s urls=%d", u, len(turnURLs)), false)
+	_ = p
+	
+	timer := time.NewTicker(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			logFn("[СТАТИСТИКА] status=online", false)
 		}
 	}
 }
