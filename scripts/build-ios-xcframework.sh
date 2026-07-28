@@ -27,6 +27,7 @@ ARCH_FLAGS="-arch arm64 -isysroot $SDK_IOS -miphoneos-version-min=15.0"
 mkdir -p "$TEMP_DIR/ios-arm64"
 
 cd "$GO_CLIENT_DIR"
+go mod tidy
 
 CGO_ENABLED=1 \
   GOOS=ios \
