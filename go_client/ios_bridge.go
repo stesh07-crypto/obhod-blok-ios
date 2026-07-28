@@ -9,6 +9,14 @@ package main
 typedef void (*LogCallbackFn)(const char* line, int isError);
 // Callback type: for stats updates
 typedef void (*StatsCallbackFn)(const char* stats);
+
+static inline void bridge_log(LogCallbackFn fn, const char* line, int isError) {
+    if (fn) fn(line, isError);
+}
+
+static inline void bridge_stats(StatsCallbackFn fn, const char* stats) {
+    if (fn) fn(stats);
+}
 */
 import "C"
 import (
