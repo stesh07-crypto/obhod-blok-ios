@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>teamID</key>
+    <string>$(DEVELOPMENT_TEAM)</string>
+    <key>uploadSymbols</key>
+    <true/>
+    <key>compileBitcode</key>
+    <false/>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>net.qwdtt.client.ios</key>
+        <string>obhod_app</string>
+        <key>net.qwdtt.client.ios.tunnel</key>
+        <string>obhod_ext</string>
+    </dict>
+</dict>
+</plist>
