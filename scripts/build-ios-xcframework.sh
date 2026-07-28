@@ -26,6 +26,8 @@ ARCH_FLAGS="-arch arm64 -isysroot $SDK_IOS -miphoneos-version-min=15.0"
 
 mkdir -p "$TEMP_DIR/ios-arm64"
 
+cd "$GO_CLIENT_DIR"
+
 CGO_ENABLED=1 \
   GOOS=ios \
   GOARCH=arm64 \
@@ -36,7 +38,7 @@ CGO_ENABLED=1 \
     -tags ios \
     -buildmode=c-archive \
     -o "$TEMP_DIR/ios-arm64/libwdttclient.a" \
-    "$GO_CLIENT_DIR"
+    .
 
 echo "✅ arm64 device done"
 
@@ -55,12 +57,11 @@ CGO_ENABLED=1 \
   CGO_CFLAGS="$ARCH_FLAGS_SIM" \
   CGO_LDFLAGS="$ARCH_FLAGS_SIM" \
   CC="$CC_SIM" \
-  GOFLAGS="-tags=ios" \
   go build \
     -tags "ios simulator" \
     -buildmode=c-archive \
     -o "$TEMP_DIR/ios-sim-arm64/libwdttclient.a" \
-    "$GO_CLIENT_DIR"
+    .
 
 echo "✅ arm64 simulator done"
 
