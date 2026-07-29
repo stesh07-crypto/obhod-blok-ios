@@ -46,7 +46,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private func handleQwdttURL(_ url: URL) {
         let absolute = url.absoluteString
 
-        // Intercept bot links: https://test-36.ru/connect/{uuid}
+        // Intercept bot links: https://test-36.ru/connect/{uuid} or https://test-36.ru/import?url=...
+        if absolute.contains("test-36.ru/import"),
+           let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let target = comps.queryItems?.first(where: { $0.name == "url" })?.value,
+           let subUrl = URL(string: target) {
+            Task { @MainActor in
+                NotificationCenter.default.post(
+                    name: .didReceiveSubscriptionURL,
+                    object: subUrl
+                )
+            }
+            return
+        }
+
         if absolute.contains("test-36.ru/connect/") {
             let components = url.pathComponents
             if let uuid = components.last, !uuid.isEmpty, uuid != "connect" {
