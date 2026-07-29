@@ -38,7 +38,7 @@ struct ProfilesView: View {
                     .listStyle(.insetGrouped)
                 }
             }
-            .navigationTitle("OBhoD")
+            .navigationTitle(profilesStore.displayProfileName)
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarLeading) {
                     if tunnelManager.isRunning || tunnelManager.isConnecting {
@@ -198,27 +198,90 @@ private struct ProfileRow: View {
 
 private struct EmptyProfilesView: View {
     @Binding var showSheet: Bool
+    @EnvironmentObject var profilesStore: ProfilesStore
+    @EnvironmentObject var tunnelManager: TunnelManager
+    @State private var isSyncing = false
 
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "shield.slash")
                 .font(.system(size: 52))
                 .foregroundColor(.orange.opacity(0.7))
-            Text("Нет профилей")
+            Text("Пока нет сохранённых профилей")
                 .font(.title3).fontWeight(.semibold)
-            Text("Добавьте подписку из бота\nили вставьте ссылку qwdtt://")
+            Text("Получите профиль автоматически из Telegram-бота или добавьте подписку вручную.")
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
-            Button {
-                showSheet = true
-            } label: {
-                Label("Добавить подписку", systemImage: "plus.circle")
-                    .font(.system(size: 15, weight: .semibold))
-                    .padding(.horizontal, 24).padding(.vertical, 12)
+                .font(.subheadline)
+                .padding(.horizontal, 24)
+
+            VStack(spacing: 12) {
+                Button {
+                    handleQuickGetProfile()
+                } label: {
+                    HStack {
+                        if isSyncing {
+                            ProgressView().tint(.white)
+                        } else {
+                            Label("⚡ Получить мой профиль", systemImage: "bolt.fill")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                    }
+                    .padding(.horizontal, 24).padding(.vertical, 14)
+                    .frame(maxWidth: .infinity)
                     .background(Color.orange)
                     .foregroundColor(.white)
-                    .clipShape(Capsule())
+                    .cornerRadius(14)
+                }
+                .disabled(isSyncing)
+
+                Button {
+                    showSheet = true
+                } label: {
+                    Label("Добавить по ссылке", systemImage: "link")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
             }
+            .padding(.horizontal, 32)
+        }
+    }
+
+    private func handleQuickGetProfile() {
+        let subUrlString = profilesStore.lastSubscriptionURL
+        if !subUrlString.isEmpty, let url = URL(string: subUrlString) {
+            isSyncing = true
+            Task {
+                do {
+                    let result = try await SubscriptionImport.fetch(url: url)
+                    await MainActor.run {
+                        let groupName = result.subscriptionName ?? "OBhoD_BLOK"
+                        for var p in result.profiles {
+                            if p.name.isEmpty || p.name == "Imported" || p.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression) != nil {
+                                p.name = groupName
+                            }
+                            profilesStore.add(p)
+                        }
+                        if let first = result.profiles.first {
+                            profilesStore.setActive(id: first.id)
+                        }
+                        isSyncing = false
+                    }
+                } catch {
+                    await MainActor.run {
+                        isSyncing = false
+                        openTelegramBot()
+                    }
+                }
+            }
+        } else {
+            openTelegramBot()
+        }
+    }
+
+    private func openTelegramBot() {
+        if let botURL = URL(string: "https://t.me/OBHOD_INT_BOT?start=profile") {
+            UIApplication.shared.open(botURL)
         }
     }
 }

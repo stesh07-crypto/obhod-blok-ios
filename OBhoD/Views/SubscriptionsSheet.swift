@@ -59,7 +59,18 @@ struct SubscriptionsSheet: View {
             }
             .alert("Добавить профили?", isPresented: $showConfirm) {
                 Button("Добавить \(pendingProfiles.count) профилей", role: .none) {
-                    for p in pendingProfiles { profilesStore.add(p) }
+                    var addedIds: [String] = []
+                    let groupName = parsedName ?? "OBhoD_BLOK"
+                    for var p in pendingProfiles {
+                        if p.name.isEmpty || p.name == "Imported" || p.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression) != nil {
+                            p.name = groupName
+                        }
+                        profilesStore.add(p)
+                        addedIds.append(p.id)
+                    }
+                    if let firstId = addedIds.first {
+                        profilesStore.setActive(id: firstId)
+                    }
                     dismiss()
                 }
                 Button("Отмена", role: .cancel) {}
@@ -114,6 +125,7 @@ struct SubscriptionsSheet: View {
             let result = try await SubscriptionImport.fetch(url: url)
             pendingProfiles = result.profiles
             parsedName = result.subscriptionName
+            profilesStore.saveSubscriptionURL(url.absoluteString)
             showConfirm = true
         } catch {
             errorMessage = error.localizedDescription

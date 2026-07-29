@@ -43,6 +43,27 @@ struct SettingsView: View {
                     Toggle("Авто-переподключение", isOn: $settings.autoReconnect)
                 }
 
+                // ── Subscriptions ──────────────────────────────────────────
+                Section(
+                    header: Text("⚡ Профиль и подписка"),
+                    footer: Text("Получите профиль из Telegram-бота или обновите текущую подписку.")
+                ) {
+                    Button {
+                        if let botURL = URL(string: "https://t.me/OBHOD_INT_BOT?start=profile") {
+                            UIApplication.shared.open(botURL)
+                        }
+                    } label: {
+                        HStack {
+                            Label("⚡ Получить мой профиль", systemImage: "bolt.fill")
+                                .foregroundColor(.orange)
+                                .fontWeight(.semibold)
+                            Spacer()
+                            Image(systemName: "arrow.up.forward.app")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 // ── About ─────────────────────────────────────────────────
                 Section(header: Text("ℹ️ О приложении")) {
                     HStack {
@@ -51,7 +72,7 @@ struct SettingsView: View {
                         Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
                             .foregroundColor(.secondary)
                     }
-                    Link("Поддержка в Telegram", destination: URL(string: "https://t.me/obhod_blok")!)
+                    Link("Поддержка в Telegram (@OBHOD_INT_BOT)", destination: URL(string: "https://t.me/OBHOD_INT_BOT")!)
                 }
             }
             .navigationTitle("Настройки")

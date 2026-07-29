@@ -44,21 +44,49 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     // MARK: Private
 
     private func handleQwdttURL(_ url: URL) {
+        let absolute = url.absoluteString
+
+        // Intercept bot links: https://test-36.ru/connect/{uuid}
+        if absolute.contains("test-36.ru/connect/") {
+            let components = url.pathComponents
+            if let uuid = components.last, !uuid.isEmpty, uuid != "connect" {
+                let subUrlString = "https://test-36.ru/sub/\(uuid)?format=qwdtt"
+                if let subUrl = URL(string: subUrlString) {
+                    Task { @MainActor in
+                        NotificationCenter.default.post(
+                            name: .didReceiveSubscriptionURL,
+                            object: subUrl
+                        )
+                    }
+                    return
+                }
+            }
+        }
+
         guard url.scheme?.lowercased() == "qwdtt" else { return }
 
         // qwdtt://import?url=<encoded_sub_url>
         if url.host == "import",
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let subUrlParam = components.queryItems?.first(where: { $0.name == "url" })?.value,
-           let subUrl = URL(string: subUrlParam) {
-
-            Task { @MainActor in
-                NotificationCenter.default.post(
-                    name: .didReceiveSubscriptionURL,
-                    object: subUrl
-                )
+           let subUrlParam = components.queryItems?.first(where: { $0.name == "url" })?.value {
+            
+            var targetString = subUrlParam
+            if targetString.contains("test-36.ru/connect/") {
+                let parts = targetString.components(separatedBy: "/connect/")
+                if parts.count > 1, let uuid = parts.last?.components(separatedBy: "?").first {
+                    targetString = "https://test-36.ru/sub/\(uuid)?format=qwdtt"
+                }
             }
-            return
+            
+            if let subUrl = URL(string: targetString) {
+                Task { @MainActor in
+                    NotificationCenter.default.post(
+                        name: .didReceiveSubscriptionURL,
+                        object: subUrl
+                    )
+                }
+                return
+            }
         }
 
         // qwdtt://config?peer=...&hashes=...&pass=...  (single profile QR)

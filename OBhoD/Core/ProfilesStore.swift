@@ -30,10 +30,13 @@ final class ProfilesStore: ObservableObject {
     @Published private(set) var groups: [ProfileGroup] = []
     @Published var currentProfileId: String = ""
 
+    @Published var lastSubscriptionURL: String = ""
+
     private let defaults = AppGroup.sharedDefaults ?? UserDefaults.standard
     private let profilesKey = "profiles_v1"
     private let groupsKey   = "groups_v1"
     private let currentKey  = "current_profile_id"
+    private let subUrlKey   = "last_sub_url"
 
     private init() {
         load()
@@ -43,6 +46,21 @@ final class ProfilesStore: ObservableObject {
 
     var currentProfile: ConnectionProfile? {
         profiles.first { $0.id == currentProfileId }
+    }
+
+    var displayProfileName: String {
+        if let p = currentProfile, !p.name.isEmpty, !p.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression).map({ _ in true })! {
+            return p.name
+        }
+        if let first = profiles.first, !first.name.isEmpty, !first.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression).map({ _ in true })! {
+            return first.name
+        }
+        return "OBhoD_BLOK"
+    }
+
+    func saveSubscriptionURL(_ urlString: String) {
+        lastSubscriptionURL = urlString
+        defaults.set(urlString, forKey: subUrlKey)
     }
 
     func add(_ profile: ConnectionProfile) {
@@ -111,6 +129,7 @@ final class ProfilesStore: ObservableObject {
             groups = decoded
         }
         currentProfileId = defaults.string(forKey: currentKey) ?? ""
+        lastSubscriptionURL = defaults.string(forKey: subUrlKey) ?? ""
     }
 
     private func save() {
