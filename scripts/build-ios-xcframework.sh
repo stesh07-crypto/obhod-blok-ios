@@ -98,12 +98,21 @@ echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 rm -rf "$TEMP_DIR"
 
 # Launch background watcher daemon to automatically patch generated OBhoD.xcodeproj
-# to objectVersion 56 (Xcode 15.4 compatible) as soon as xcodegen creates it.
+# to objectVersion 56 (Xcode 15.4 compatible) and set DEVELOPMENT_TEAM from provisioning profiles.
 (
-  for i in $(seq 1 120); do
+  for i in $(seq 1 180); do
+    TEAM_ID=""
+    PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
+    if [ -f "$PP_FILE" ]; then
+      TEAM_ID=$(grep -A1 "<key>TeamIdentifier</key>" "$PP_FILE" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
+    fi
+
     if [ -f "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" ]; then
       sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
       sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
+      if [ -n "$TEAM_ID" ]; then
+        sed -i '' "s/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = $TEAM_ID;/g" "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
+      fi
     fi
     sleep 1
   done
