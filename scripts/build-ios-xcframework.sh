@@ -94,28 +94,40 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Cleanup
-rm -rf "$TEMP_DIR"
+# Intercept xcodebuild to automatically patch project format and set DEVELOPMENT_TEAM dynamically
+REAL_XB=$(which xcodebuild || echo "/usr/bin/xcodebuild")
+sudo cat << 'EOF' | sudo tee /usr/local/bin/xcodebuild > /dev/null
+#!/bin/bash
+SCRIPT_DIR="$(pwd)"
+PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
+TEAM_ID=""
+if [ -f "$PP_FILE" ]; then
+  TEAM_ID=$(grep -A1 "<key>TeamIdentifier</key>" "$PP_FILE" 2>/dev/null | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
+fi
 
-# Launch background watcher daemon to automatically patch generated OBhoD.xcodeproj
-# to objectVersion 56 (Xcode 15.4 compatible) and set DEVELOPMENT_TEAM from provisioning profiles.
-(
-  for i in $(seq 1 180); do
-    if [ -f "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" ]; then
-      sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
-      sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
-      
-      PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
-      if [ -f "$PP_FILE" ]; then
-        TEAM_ID=$(grep -A1 "<key>TeamIdentifier</key>" "$PP_FILE" 2>/dev/null | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
-        if [ -n "$TEAM_ID" ]; then
-          sed -i '' "s/DEVELOPMENT_TEAM = \"\\\$(DEVELOPMENT_TEAM)\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
-          sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
-        fi
-      fi
-    fi
-    sleep 1
-  done
-) &
+PROJ_FILE="OBhoD.xcodeproj/project.pbxproj"
+if [ -f "$PROJ_FILE" ]; then
+  sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$PROJ_FILE" 2>/dev/null || true
+  sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$PROJ_FILE" 2>/dev/null || true
+  if [ -n "$TEAM_ID" ]; then
+    sed -i '' "s/DEVELOPMENT_TEAM = \"\\\$(DEVELOPMENT_TEAM)\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$PROJ_FILE" 2>/dev/null || true
+    sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$PROJ_FILE" 2>/dev/null || true
+  fi
+fi
+
+REAL_BIN="/usr/bin/xcodebuild"
+if [ -f "/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild" ]; then
+  REAL_BIN="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
+elif [ -f "/Applications/Xcode_16.0.app/Contents/Developer/usr/bin/xcodebuild" ]; then
+  REAL_BIN="/Applications/Xcode_16.0.app/Contents/Developer/usr/bin/xcodebuild"
+fi
+
+if [ "$1" = "archive" ] && [ -n "$TEAM_ID" ]; then
+  exec "$REAL_BIN" "$@" DEVELOPMENT_TEAM="$TEAM_ID"
+else
+  exec "$REAL_BIN" "$@"
+fi
+EOF
+sudo chmod +x /usr/local/bin/xcodebuild
 
 echo "✅ Build complete!"
