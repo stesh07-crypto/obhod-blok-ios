@@ -15,11 +15,14 @@ TEMP_DIR="$ROOT_DIR/.build_tmp"
 mkdir -p "$OUTPUT_DIR" "$TEMP_DIR"
 
 # Provide xcpretty passthrough so xcodebuild errors are logged in full without truncation
-if command -v xcpretty >/dev/null 2>&1; PIECMD="$(which xcpretty)"; sudo rm -f "$PIECMD"; cat << 'EOF' | sudo tee "$PIECMD" > /dev/null
+if command -v xcpretty >/dev/null 2>&1; then
+    PIECMD="$(which xcpretty)"
+    sudo rm -f "$PIECMD"
+    cat << 'EOF' | sudo tee "$PIECMD" > /dev/null
 #!/bin/bash
 cat
 EOF
-sudo chmod +x "$PIECMD"
+    sudo chmod +x "$PIECMD"
 fi
 
 echo "📦 Building Go iOS xcframework..."
