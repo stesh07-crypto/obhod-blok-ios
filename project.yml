@@ -42,7 +42,7 @@ targets:
         Release:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Apple Distribution
-          PROVISIONING_PROFILE_SPECIFIER: obhod_app
+          PROVISIONING_PROFILE_SPECIFIER: OBhod_app
     dependencies:
       - target: TunnelExtension
       - framework: Frameworks/libwdttclient.xcframework
@@ -68,7 +68,7 @@ targets:
         Release:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Apple Distribution
-          PROVISIONING_PROFILE_SPECIFIER: obhod_ext
+          PROVISIONING_PROFILE_SPECIFIER: OBhod_ext
     dependencies:
       - framework: Frameworks/libwdttclient.xcframework
         embed: false

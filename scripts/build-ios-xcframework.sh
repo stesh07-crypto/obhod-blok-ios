@@ -94,16 +94,28 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Create /usr/local/bin/xcodebuild wrapper to dynamically fix project format and remove conflicting global profile override
+# Create /usr/local/bin/xcodebuild wrapper to dynamically fix project format, copy profiles to UUID names, and remove conflicting global profile override
 sudo cat << 'EOF' | sudo tee /usr/local/bin/xcodebuild > /dev/null
 #!/bin/bash
+PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+if [ -d "$PP_DIR" ]; then
+  for file in "$PP_DIR"/*.mobileprovision; do
+    if [ -f "$file" ]; then
+      UUID=$(strings "$file" 2>/dev/null | grep -A1 "UUID" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
+      if [ -n "$UUID" ] && [ ! -f "$PP_DIR/${UUID}.mobileprovision" ]; then
+        cp "$file" "$PP_DIR/${UUID}.mobileprovision" 2>/dev/null || true
+      fi
+    fi
+  done
+fi
+
 PROJ_FILE="OBhoD.xcodeproj/project.pbxproj"
 if [ -f "$PROJ_FILE" ]; then
   sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$PROJ_FILE" 2>/dev/null || true
   sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$PROJ_FILE" 2>/dev/null || true
 fi
 
-# Filter out global PROVISIONING_PROFILE_SPECIFIER override so OBhoD gets obhod_app and TunnelExtension gets obhod_ext
+# Filter out global PROVISIONING_PROFILE_SPECIFIER override so OBhoD gets OBhod_app and TunnelExtension gets OBhod_ext
 NEW_ARGS=()
 for arg in "$@"; do
   if [[ "$arg" == PROVISIONING_PROFILE_SPECIFIER=* ]]; then
