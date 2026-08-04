@@ -57,6 +57,8 @@ targets:
     deploymentTarget: '15.0'
     sources:
       - path: TunnelExtension
+      - path: OBhoD/Core/AppGroup.swift
+      - path: OBhoD/Core/GoClient.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios.tunnel
