@@ -94,20 +94,13 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Intercept xcodebuild directly inside Xcode 15.4 developer toolchain directory
-DEV_XB="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
-if [ -f "$DEV_XB" ] && [ ! -f "${DEV_XB}.real" ]; then
-  sudo mv "$DEV_XB" "${DEV_XB}.real"
-fi
-
-if [ -f "${DEV_XB}.real" ]; then
-  sudo cat << 'EOF' | sudo tee "$DEV_XB" > /dev/null
+# Create /usr/local/bin/xcodebuild wrapper to dynamically fix project format and inject DEVELOPMENT_TEAM
+sudo cat << 'EOF' | sudo tee /usr/local/bin/xcodebuild > /dev/null
 #!/bin/bash
-REAL_BIN="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild.real"
 PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
 TEAM_ID=""
 if [ -f "$PP_FILE" ]; then
-  TEAM_ID=$(grep -A1 "<key>TeamIdentifier</key>" "$PP_FILE" 2>/dev/null | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
+  TEAM_ID=$(strings "$PP_FILE" 2>/dev/null | grep -A1 "TeamIdentifier" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
 fi
 
 PROJ_FILE="OBhoD.xcodeproj/project.pbxproj"
@@ -115,18 +108,17 @@ if [ -f "$PROJ_FILE" ]; then
   sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$PROJ_FILE" 2>/dev/null || true
   sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$PROJ_FILE" 2>/dev/null || true
   if [ -n "$TEAM_ID" ]; then
-    sed -i '' "s/DEVELOPMENT_TEAM = \"\\\$(DEVELOPMENT_TEAM)\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$PROJ_FILE" 2>/dev/null || true
-    sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" "$PROJ_FILE" 2>/dev/null || true
+    sed -i '' "s/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = $TEAM_ID;/g" "$PROJ_FILE" 2>/dev/null || true
   fi
 fi
 
-if [ "$1" = "archive" ] && [ -n "$TEAM_ID" ]; then
-  exec "$REAL_BIN" "$@" DEVELOPMENT_TEAM="$TEAM_ID"
+REAL_XCODEBUILD="/usr/bin/xcodebuild"
+if [ -n "$TEAM_ID" ]; then
+  exec "$REAL_XCODEBUILD" "$@" DEVELOPMENT_TEAM="$TEAM_ID"
 else
-  exec "$REAL_BIN" "$@"
+  exec "$REAL_XCODEBUILD" "$@"
 fi
 EOF
-  sudo chmod +x "$DEV_XB"
-fi
+sudo chmod +x /usr/local/bin/xcodebuild
 
 echo "✅ Build complete!"
