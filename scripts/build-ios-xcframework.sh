@@ -94,11 +94,19 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Intercept xcodebuild to automatically patch project format and set DEVELOPMENT_TEAM dynamically
-REAL_XB=$(which xcodebuild || echo "/usr/bin/xcodebuild")
-sudo cat << 'EOF' | sudo tee /usr/local/bin/xcodebuild > /dev/null
+# Intercept xcodebuild directly at developer toolchain location
+XB_TARGET="/usr/bin/xcodebuild"
+if [ -f "/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild" ]; then
+  XB_TARGET="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
+fi
+
+if [ ! -f "${XB_TARGET}.real" ]; then
+  sudo mv "$XB_TARGET" "${XB_TARGET}.real"
+fi
+
+cat << 'EOF' | sudo tee "$XB_TARGET" > /dev/null
 #!/bin/bash
-SCRIPT_DIR="$(pwd)"
+REAL_BIN="$(dirname "$0")/xcodebuild.real"
 PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
 TEAM_ID=""
 if [ -f "$PP_FILE" ]; then
@@ -115,19 +123,12 @@ if [ -f "$PROJ_FILE" ]; then
   fi
 fi
 
-REAL_BIN="/usr/bin/xcodebuild"
-if [ -f "/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild" ]; then
-  REAL_BIN="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
-elif [ -f "/Applications/Xcode_16.0.app/Contents/Developer/usr/bin/xcodebuild" ]; then
-  REAL_BIN="/Applications/Xcode_16.0.app/Contents/Developer/usr/bin/xcodebuild"
-fi
-
 if [ "$1" = "archive" ] && [ -n "$TEAM_ID" ]; then
   exec "$REAL_BIN" "$@" DEVELOPMENT_TEAM="$TEAM_ID"
 else
   exec "$REAL_BIN" "$@"
 fi
 EOF
-sudo chmod +x /usr/local/bin/xcodebuild
+sudo chmod +x "$XB_TARGET"
 
 echo "✅ Build complete!"
