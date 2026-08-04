@@ -94,19 +94,16 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Intercept xcodebuild directly at developer toolchain location
-XB_TARGET="/usr/bin/xcodebuild"
-if [ -f "/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild" ]; then
-  XB_TARGET="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
+# Intercept xcodebuild directly inside Xcode 15.4 developer toolchain directory
+DEV_XB="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild"
+if [ -f "$DEV_XB" ] && [ ! -f "${DEV_XB}.real" ]; then
+  sudo mv "$DEV_XB" "${DEV_XB}.real"
 fi
 
-if [ ! -f "${XB_TARGET}.real" ]; then
-  sudo mv "$XB_TARGET" "${XB_TARGET}.real"
-fi
-
-cat << 'EOF' | sudo tee "$XB_TARGET" > /dev/null
+if [ -f "${DEV_XB}.real" ]; then
+  sudo cat << 'EOF' | sudo tee "$DEV_XB" > /dev/null
 #!/bin/bash
-REAL_BIN="$(dirname "$0")/xcodebuild.real"
+REAL_BIN="/Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild.real"
 PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
 TEAM_ID=""
 if [ -f "$PP_FILE" ]; then
@@ -129,6 +126,7 @@ else
   exec "$REAL_BIN" "$@"
 fi
 EOF
-sudo chmod +x "$XB_TARGET"
+  sudo chmod +x "$DEV_XB"
+fi
 
 echo "✅ Build complete!"
