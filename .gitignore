@@ -1,0 +1,6 @@
+*.log
+keys/
+.build_tmp/
+*.xcodeproj
+Frameworks/libwdttclient.xcframework
+.DS_Store
