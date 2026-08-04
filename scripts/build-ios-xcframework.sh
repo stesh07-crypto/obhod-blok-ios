@@ -85,4 +85,17 @@ echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
 # Cleanup
 rm -rf "$TEMP_DIR"
+
+# Launch background watcher daemon to automatically patch generated OBhoD.xcodeproj
+# to objectVersion 56 (Xcode 15.4 compatible) as soon as xcodegen creates it.
+(
+  for i in $(seq 1 120); do
+    if [ -f "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" ]; then
+      sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
+      sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$ROOT_DIR/OBhoD.xcodeproj/project.pbxproj" 2>/dev/null || true
+    fi
+    sleep 1
+  done
+) &
+
 echo "✅ Build complete!"
