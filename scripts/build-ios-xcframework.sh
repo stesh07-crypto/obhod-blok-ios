@@ -94,30 +94,26 @@ xcodebuild -create-xcframework \
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 
-# Create /usr/local/bin/xcodebuild wrapper to dynamically fix project format and inject DEVELOPMENT_TEAM
+# Create /usr/local/bin/xcodebuild wrapper to dynamically fix project format and remove conflicting global profile override
 sudo cat << 'EOF' | sudo tee /usr/local/bin/xcodebuild > /dev/null
 #!/bin/bash
-PP_FILE="$HOME/Library/MobileDevice/Provisioning Profiles/obhod_app.mobileprovision"
-TEAM_ID=""
-if [ -f "$PP_FILE" ]; then
-  TEAM_ID=$(strings "$PP_FILE" 2>/dev/null | grep -A1 "TeamIdentifier" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/\1/' | head -n 1)
-fi
-
 PROJ_FILE="OBhoD.xcodeproj/project.pbxproj"
 if [ -f "$PROJ_FILE" ]; then
   sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$PROJ_FILE" 2>/dev/null || true
   sed -i '' 's/compatibilityVersion = ".*";/compatibilityVersion = "Xcode 15.0";/g' "$PROJ_FILE" 2>/dev/null || true
-  if [ -n "$TEAM_ID" ]; then
-    sed -i '' "s/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = $TEAM_ID;/g" "$PROJ_FILE" 2>/dev/null || true
-  fi
 fi
 
+# Filter out global PROVISIONING_PROFILE_SPECIFIER override so OBhoD gets obhod_app and TunnelExtension gets obhod_ext
+NEW_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == PROVISIONING_PROFILE_SPECIFIER=* ]]; then
+    continue
+  fi
+  NEW_ARGS+=("$arg")
+done
+
 REAL_XCODEBUILD="/usr/bin/xcodebuild"
-if [ -n "$TEAM_ID" ]; then
-  exec "$REAL_XCODEBUILD" "$@" DEVELOPMENT_TEAM="$TEAM_ID"
-else
-  exec "$REAL_XCODEBUILD" "$@"
-fi
+exec "$REAL_XCODEBUILD" "${NEW_ARGS[@]}"
 EOF
 sudo chmod +x /usr/local/bin/xcodebuild
 
