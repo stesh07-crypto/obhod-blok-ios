@@ -77,8 +77,8 @@ CGO_ENABLED=1 \
 
 echo "✅ arm64 simulator done"
 
-# ── 3. Copy headers ────────────────────────────────────────────────────────
 cp "$TEMP_DIR/ios-arm64/libwdttclient.h" "$TEMP_DIR/libwdttclient.h"
+cp "$TEMP_DIR/ios-arm64/libwdttclient.h" "$OUTPUT_DIR/libwdttclient.h"
 
 # ── 4. Create xcframework ──────────────────────────────────────────────────
 echo "📦 Creating xcframework..."
@@ -91,6 +91,9 @@ xcodebuild -create-xcframework \
   -library "$TEMP_DIR/ios-sim-arm64/libwdttclient.a" \
     -headers "$TEMP_DIR/libwdttclient.h" \
   -output "$OUTPUT_DIR/libwdttclient.xcframework"
+
+mkdir -p "$OUTPUT_DIR/libwdttclient.xcframework/Headers"
+cp "$TEMP_DIR/ios-arm64/libwdttclient.h" "$OUTPUT_DIR/libwdttclient.xcframework/Headers/libwdttclient.h"
 
 echo "🎉 xcframework created: $OUTPUT_DIR/libwdttclient.xcframework"
 

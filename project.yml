@@ -18,6 +18,10 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: '15.0'
     ENABLE_BITCODE: NO
     DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    HEADER_SEARCH_PATHS:
+      - $(SRCROOT)/Frameworks
+      - $(SRCROOT)/Frameworks/libwdttclient.xcframework/ios-arm64/Headers
+      - $(SRCROOT)/Frameworks/libwdttclient.xcframework/ios-arm64-simulator/Headers
 
 targets:
 
