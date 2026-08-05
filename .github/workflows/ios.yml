@@ -112,10 +112,6 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
-            TARGETED_DEVICE_FAMILY="1,2" \
-            ASSETCATALOG_COMPILER_TARGET_DEVICE_FAMILY="1,2" \
-            ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS=NO \
-            ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS=NO \
             2>&1 | tee /tmp/archive.log
           if grep -q 'ARCHIVE FAILED' /tmp/archive.log; then
             echo '=== ARCHIVE FAILED - full error context ==='
