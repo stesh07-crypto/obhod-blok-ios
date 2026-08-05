@@ -84,6 +84,7 @@ jobs:
 
       - name: Build archive
         run: |
+          set -o pipefail
           xcodebuild archive \
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
@@ -94,16 +95,26 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
-            -allowProvisioningUpdates \
-            | xcpretty --color
+            2>&1 | tee /tmp/archive.log
+          if grep -q 'ARCHIVE FAILED' /tmp/archive.log; then
+            echo '=== ARCHIVE FAILED - full error context ==='
+            grep -A5 -B5 'error:' /tmp/archive.log | tail -50
+            exit 1
+          fi
 
       - name: Export IPA
         run: |
+          set -o pipefail
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -exportPath "$RUNNER_TEMP/export" \
             -exportOptionsPlist "scripts/export.plist" \
-            | xcpretty --color
+            2>&1 | tee /tmp/export.log
+          if grep -q 'EXPORT FAILED' /tmp/export.log; then
+            echo '=== EXPORT FAILED - error context ==='
+            grep -A5 -B5 'error:' /tmp/export.log | tail -30
+            exit 1
+          fi
 
       - name: Rename IPA
         run: |
