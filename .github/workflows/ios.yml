@@ -90,7 +90,7 @@ jobs:
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -destination "generic/platform=iOS" \
             CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="obhod_app" \
+            PROVISIONING_PROFILE_SPECIFIER="OBhod_app" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             -allowProvisioningUpdates \
             | xcpretty --color
@@ -127,14 +127,19 @@ jobs:
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
         run: |
           mkdir -p ~/.appstoreconnect/private_keys
-          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode \
-            > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          echo "API Key ID: $APP_STORE_CONNECT_API_KEY_ID"
+          echo "Issuer ID:  $APP_STORE_CONNECT_API_ISSUER_ID"
+          echo "Key file:   $(ls -la $KEY_PATH)"
+          echo "IPA:        ${{ env.IPA_PATH }}"
 
           xcrun altool --upload-app \
             --type ios \
             --file "${{ env.IPA_PATH }}" \
             --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
+            --private-key "$KEY_PATH" \
             --verbose
 
       - name: Cleanup keychain
