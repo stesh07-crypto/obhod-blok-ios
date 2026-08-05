@@ -107,10 +107,14 @@ jobs:
 
       - name: Rename IPA
         run: |
-          VERSION=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleShortVersionString | grep -oE '[0-9.]+')
-          BUILD=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleVersion | grep -oE '[0-9]+')
+          echo "Export directory contents:"
+          ls -la "$RUNNER_TEMP/export/" || true
+          VERSION=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleShortVersionString | grep -oE '[0-9.]+' | head -1)
+          BUILD=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleVersion | grep -oE '[0-9]+' | head -1)
           FINAL_NAME="OBhoD-ios-${VERSION}-b${BUILD}.ipa"
-          mv "$RUNNER_TEMP/export/OBhoD.ipa" "$RUNNER_TEMP/export/${FINAL_NAME}"
+          FOUND_IPA=$(find "$RUNNER_TEMP/export" -name "*.ipa" | head -1)
+          echo "Found IPA: $FOUND_IPA"
+          mv "$FOUND_IPA" "$RUNNER_TEMP/export/${FINAL_NAME}"
           echo "IPA_PATH=$RUNNER_TEMP/export/${FINAL_NAME}" >> $GITHUB_ENV
           echo "IPA_NAME=${FINAL_NAME}" >> $GITHUB_ENV
 
