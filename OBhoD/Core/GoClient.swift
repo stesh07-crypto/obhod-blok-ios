@@ -46,16 +46,34 @@ enum GoClient {
         obfsMode: String,
         vkAnonPath: String
     ) -> Int32 {
+        let pPeer = strdup(peer)
+        let pHashes = strdup(hashes)
+        let pPassword = strdup(password)
+        let pDeviceID = strdup(deviceID)
+        let pDns = strdup(dns)
+        let pObfsMode = strdup(obfsMode)
+        let pVkAnonPath = strdup(vkAnonPath)
+
+        defer {
+            free(pPeer)
+            free(pHashes)
+            free(pPassword)
+            free(pDeviceID)
+            free(pDns)
+            free(pObfsMode)
+            free(pVkAnonPath)
+        }
+
         return WDTT_Start(
-            peer,
-            hashes,
-            password,
+            pPeer,
+            pHashes,
+            pPassword,
             Int32(port),
             Int32(workers),
-            deviceID,
-            dns,
-            obfsMode,
-            vkAnonPath
+            pDeviceID,
+            pDns,
+            pObfsMode,
+            pVkAnonPath
         )
     }
 
