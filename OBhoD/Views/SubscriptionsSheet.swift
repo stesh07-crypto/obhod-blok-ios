@@ -47,7 +47,7 @@ struct SubscriptionsSheet: View {
                     .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
                     .listRowBackground(Color.orange)
                     .foregroundColor(.white)
-                    .fontWeight(.semibold)
+                    .font(.body.bold())
                 }
             }
             .navigationTitle("Добавить подписку")

@@ -208,7 +208,7 @@ private struct EmptyProfilesView: View {
                 .font(.system(size: 52))
                 .foregroundColor(.orange.opacity(0.7))
             Text("Пока нет сохранённых профилей")
-                .font(.title3).fontWeight(.semibold)
+                .font(.title3.bold())
             Text("Получите профиль автоматически из Telegram-бота или добавьте подписку вручную.")
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)

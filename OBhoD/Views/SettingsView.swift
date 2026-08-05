@@ -56,7 +56,7 @@ struct SettingsView: View {
                         HStack {
                             Label("⚡ Получить мой профиль", systemImage: "bolt.fill")
                                 .foregroundColor(.orange)
-                                .fontWeight(.semibold)
+                                .font(.body.bold())
                             Spacer()
                             Image(systemName: "arrow.up.forward.app")
                                 .foregroundColor(.secondary)

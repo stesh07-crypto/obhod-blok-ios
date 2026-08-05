@@ -1,6 +1,7 @@
 import Foundation
 import NetworkExtension
 import Combine
+import UIKit
 
 // MARK: – Log Entry
 
