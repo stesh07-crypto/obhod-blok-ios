@@ -41,11 +41,12 @@ jobs:
         run: |
           echo "=== Available Xcode versions ==="
           ls -d /Applications/Xcode*.app
-          if [ -d "/Applications/Xcode_16.0.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_16.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+          XCODE_PATH="/Applications/Xcode_16.0.app/Contents/Developer"
+          if [ ! -d "$XCODE_PATH" ]; then
+            XCODE_PATH="/Applications/Xcode_16.1.app/Contents/Developer"
           fi
+          sudo xcode-select -s "$XCODE_PATH"
+          echo "DEVELOPER_DIR=$XCODE_PATH" >> $GITHUB_ENV
           xcodebuild -version
           xcodebuild -showsdks
 
@@ -95,6 +96,7 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild archive \
+            -sdk iphoneos \
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
