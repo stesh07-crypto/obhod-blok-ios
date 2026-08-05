@@ -5,7 +5,7 @@
     <key>method</key>
     <string>app-store-connect</string>
     <key>teamID</key>
-    <string>$(DEVELOPMENT_TEAM)</string>
+    <string>4Z5K8Y686M</string>
     <key>uploadSymbols</key>
     <true/>
     <key>compileBitcode</key>
@@ -15,9 +15,9 @@
     <key>provisioningProfiles</key>
     <dict>
         <key>net.qwdtt.client.ios</key>
-        <string>obhod_app</string>
+        <string>OBhod_app</string>
         <key>net.qwdtt.client.ios.tunnel</key>
-        <string>obhod_ext</string>
+        <string>OBhod_ext</string>
     </dict>
 </dict>
 </plist>
