@@ -13,7 +13,7 @@ on:
         type: boolean
 
 env:
-  XCODE_VERSION: '15.4'
+  XCODE_VERSION: '16.3'
   IOS_DEPLOYMENT_TARGET: '15.0'
   BUNDLE_ID: 'net.qwdtt.client.ios'
   APP_NAME: 'OBhoD'
@@ -23,7 +23,7 @@ env:
 jobs:
   build-and-upload:
     name: Build iOS App & Upload to TestFlight
-    runs-on: macos-14   # Apple Silicon — M1 runner
+    runs-on: macos-15   # Xcode 16 with iOS 18 SDK
 
     steps:
       - name: Checkout repository
