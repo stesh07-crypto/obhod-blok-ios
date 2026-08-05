@@ -41,9 +41,15 @@ jobs:
         run: |
           echo "=== Available Xcode versions ==="
           ls -d /Applications/Xcode*.app
-          XCODE_PATH="/Applications/Xcode_16.0.app/Contents/Developer"
+          XCODE_PATH="/Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer"
+          if [ ! -d "$XCODE_PATH" ]; then
+            XCODE_PATH="/Applications/Xcode_16.2.app/Contents/Developer"
+          fi
           if [ ! -d "$XCODE_PATH" ]; then
             XCODE_PATH="/Applications/Xcode_16.1.app/Contents/Developer"
+          fi
+          if [ ! -d "$XCODE_PATH" ]; then
+            XCODE_PATH="/Applications/Xcode_16.0.app/Contents/Developer"
           fi
           sudo xcode-select -s "$XCODE_PATH"
           echo "DEVELOPER_DIR=$XCODE_PATH" >> $GITHUB_ENV
