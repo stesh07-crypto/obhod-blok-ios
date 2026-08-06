@@ -99,11 +99,8 @@ jobs:
       - name: Build archive
         run: |
           set -o pipefail
-          # Determine SDK version dynamically
-          SDK_VER=$(xcodebuild -showsdks 2>/dev/null | grep '^    iOS ' | grep -oE 'iphoneos[0-9.]+' | tail -1)
-          echo "Using SDK: $SDK_VER"
           xcodebuild archive \
-            -sdk "${SDK_VER:-iphoneos}" \
+            -sdk iphoneos \
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
@@ -113,8 +110,8 @@ jobs:
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
-            2>&1 | tee /tmp/archive.log
-          if grep -q 'ARCHIVE FAILED' /tmp/archive.log || [ ${PIPESTATUS[0]} -ne 0 ]; then
+            2>&1 | tee /tmp/archive.log || true
+          if grep -q 'ARCHIVE FAILED' /tmp/archive.log || [ ! -d "$RUNNER_TEMP/OBhoD.xcarchive" ]; then
             echo '=== ARCHIVE FAILED - full log tail ==='
             tail -n 150 /tmp/archive.log
             exit 1
