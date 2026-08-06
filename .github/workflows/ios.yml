@@ -75,7 +75,7 @@ jobs:
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign -t agg
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security list-keychains -s "$KEYCHAIN_PATH" $(security list-keychains | tr -d '"')
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
