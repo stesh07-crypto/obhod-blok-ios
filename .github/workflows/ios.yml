@@ -101,12 +101,14 @@ jobs:
       - name: Build archive
         run: |
           set -o pipefail
+          # Determine SDK version dynamically
+          SDK_VER=$(xcodebuild -showsdks 2>/dev/null | grep iphoneos | grep -oE 'iphoneos[0-9.]+' | tail -1)
+          echo "Using SDK: $SDK_VER"
           xcodebuild archive \
-            -sdk iphoneos \
+            -sdk "${SDK_VER:-iphoneos}" \
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
-            -destination "generic/platform=iOS" \
             CODE_SIGN_STYLE=Manual \
             PROVISIONING_PROFILE_SPECIFIER="OBhod_app" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
