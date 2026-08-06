@@ -100,6 +100,9 @@ jobs:
           if [ -n "$APP_UUID" ]; then cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"; fi
           if [ -n "$EXT_UUID" ]; then cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"; fi
 
+          echo "APP_UUID=${APP_UUID}" >> $GITHUB_ENV
+          echo "EXT_UUID=${EXT_UUID}" >> $GITHUB_ENV
+
           echo "=== APP PROVISIONING PROFILE INFO (UUID: $APP_UUID) ==="
           security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A2 '<key>Name</key>' || true
           security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A15 '<key>Entitlements</key>' || true
@@ -118,9 +121,12 @@ jobs:
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -destination "generic/platform=iOS" \
             PROVISIONING_PROFILE_SPECIFIER:OBhoD="OBhod_app" \
+            PROVISIONING_PROFILE:OBhoD="${{ env.APP_UUID }}" \
             PROVISIONING_PROFILE_SPECIFIER:TunnelExtension="OBhod_ext" \
+            PROVISIONING_PROFILE:TunnelExtension="${{ env.EXT_UUID }}" \
             CODE_SIGN_STYLE="Manual" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM="4Z5K8Y686M" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
@@ -134,6 +140,39 @@ jobs:
       - name: Export IPA
         run: |
           set -o pipefail
+
+          cat <<EOF > scripts/export.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>Apple Distribution</string>
+    <key>teamID</key>
+    <string>4Z5K8Y686M</string>
+    <key>uploadSymbols</key>
+    <true/>
+    <key>compileBitcode</key>
+    <false/>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>net.qwdtt.client.ios</key>
+        <string>${{ env.APP_UUID }}</string>
+        <key>net.qwdtt.client.ios.tunnel</key>
+        <string>${{ env.EXT_UUID }}</string>
+    </dict>
+</dict>
+EOF
+
+          echo "Generated export.plist:"
+          cat scripts/export.plist
+
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -exportPath "$RUNNER_TEMP/export" \
