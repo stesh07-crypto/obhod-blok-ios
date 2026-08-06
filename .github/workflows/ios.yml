@@ -74,7 +74,7 @@ jobs:
 
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
           echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign -t agg
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "" -T /usr/bin/codesign -t agg
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
