@@ -104,9 +104,6 @@ jobs:
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
-            CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="OBhod_app" \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
