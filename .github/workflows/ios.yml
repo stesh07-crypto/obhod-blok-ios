@@ -1,5 +1,4 @@
 name: OBhoD iOS — Build & TestFlight
-# Trigger build run
 
 on:
   push:
@@ -10,8 +9,7 @@ on:
       upload_testflight:
         description: 'Upload to TestFlight'
         required: false
-        default: true
-        type: boolean
+        default: 'true'
 
 env:
   XCODE_VERSION: '16.0'
@@ -24,7 +22,7 @@ env:
 jobs:
   build-and-upload:
     name: Build iOS App & Upload to TestFlight
-    runs-on: macos-15   # Xcode 16 with iOS 18 SDK
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -42,12 +40,16 @@ jobs:
         run: |
           echo "=== Available Xcode versions ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || true
-          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          XCODE_PATH=$(ls -d /Applications/Xcode_16.[0-9]*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ] || [ ! -d "${XCODE_PATH}/Contents/Developer" ]; then
+            XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
+          fi
           DEV_DIR="${XCODE_PATH}/Contents/Developer"
           echo "Using Xcode: $XCODE_PATH"
           sudo xcode-select -s "$DEV_DIR"
           echo "DEVELOPER_DIR=$DEV_DIR" >> $GITHUB_ENV
           xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -62,20 +64,18 @@ jobs:
 
       - name: Import signing certificate
         env:
-          DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          echo "$DISTRIBUTION_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign -t agg
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
@@ -94,9 +94,6 @@ jobs:
 
           if [ -n "$APP_UUID" ]; then cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"; fi
           if [ -n "$EXT_UUID" ]; then cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"; fi
-
-          echo "APP_UUID=${APP_UUID}" >> $GITHUB_ENV
-          echo "EXT_UUID=${EXT_UUID}" >> $GITHUB_ENV
 
           echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
           security cms -D -i "$PP_DIR/obhod_app.mobileprovision" > /tmp/app.plist
@@ -128,39 +125,6 @@ jobs:
       - name: Export IPA
         run: |
           set -o pipefail
-
-          cat <<EOF > scripts/export.plist
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>method</key>
-    <string>app-store</string>
-    <key>signingStyle</key>
-    <string>manual</string>
-    <key>signingCertificate</key>
-    <string>Apple Distribution</string>
-    <key>teamID</key>
-    <string>4Z5K8Y686M</string>
-    <key>uploadSymbols</key>
-    <true/>
-    <key>compileBitcode</key>
-    <false/>
-    <key>stripSwiftSymbols</key>
-    <true/>
-    <key>provisioningProfiles</key>
-    <dict>
-        <key>net.qwdtt.client.ios</key>
-        <string>$APP_UUID</string>
-        <key>net.qwdtt.client.ios.tunnel</key>
-        <string>$EXT_UUID</string>
-    </dict>
-</dict>
-EOF
-
-          echo "Generated export.plist:"
-          cat scripts/export.plist
-
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -exportPath "$RUNNER_TEMP/export" \
@@ -182,28 +146,11 @@ EOF
         run: |
           echo "Export directory contents:"
           ls -la "$RUNNER_TEMP/export/" || true
-
-          echo "=== EXPORT OPTIONS PLIST ==="
-          cat "$RUNNER_TEMP/export/ExportOptions.plist" || true
-
-          echo "=== DISTRIBUTION SUMMARY PLIST ==="
-          cat "$RUNNER_TEMP/export/DistributionSummary.plist" || true
-
           VERSION=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleShortVersionString | grep -oE '[0-9.]+' | head -1)
           BUILD=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleVersion | grep -oE '[0-9]+' | head -1)
           FINAL_NAME="OBhoD-ios-${VERSION}-b${BUILD}.ipa"
           FOUND_IPA=$(find "$RUNNER_TEMP/export" -name "*.ipa" | head -1)
           echo "Found IPA: $FOUND_IPA"
-
-          mkdir -p "$RUNNER_TEMP/ipa_inspect"
-          unzip -q "$FOUND_IPA" -d "$RUNNER_TEMP/ipa_inspect"
-
-          echo "=== EXPORTED IPA MAIN APP ENTITLEMENTS ==="
-          codesign -d --entitlements :- "$RUNNER_TEMP/ipa_inspect/Payload/OBhoD.app" || true
-
-          echo "=== EXPORTED IPA TUNNEL EXTENSION ENTITLEMENTS ==="
-          codesign -d --entitlements :- "$RUNNER_TEMP/ipa_inspect/Payload/OBhoD.app/PlugIns/TunnelExtension.appex" || true
-
           mv "$FOUND_IPA" "$RUNNER_TEMP/export/${FINAL_NAME}"
           echo "IPA_PATH=$RUNNER_TEMP/export/${FINAL_NAME}" >> $GITHUB_ENV
           echo "IPA_NAME=${FINAL_NAME}" >> $GITHUB_ENV
