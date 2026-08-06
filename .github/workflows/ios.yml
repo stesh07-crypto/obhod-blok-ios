@@ -1,5 +1,5 @@
 name: OBhoD iOS — Build & TestFlight
-
+# Trigger build with clean p12 certificate secrets
 on:
   push:
     branches: [main, master]
