@@ -122,9 +122,9 @@ jobs:
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -destination "generic/platform=iOS" \
             PROVISIONING_PROFILE_SPECIFIER:OBhoD="OBhod_app" \
-            PROVISIONING_PROFILE:OBhoD="${{ env.APP_UUID }}" \
+            PROVISIONING_PROFILE:OBhoD="$APP_UUID" \
             PROVISIONING_PROFILE_SPECIFIER:TunnelExtension="OBhod_ext" \
-            PROVISIONING_PROFILE:TunnelExtension="${{ env.EXT_UUID }}" \
+            PROVISIONING_PROFILE:TunnelExtension="$EXT_UUID" \
             CODE_SIGN_STYLE="Manual" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             DEVELOPMENT_TEAM="4Z5K8Y686M" \
@@ -164,9 +164,9 @@ jobs:
     <key>provisioningProfiles</key>
     <dict>
         <key>net.qwdtt.client.ios</key>
-        <string>${{ env.APP_UUID }}</string>
+        <string>$APP_UUID</string>
         <key>net.qwdtt.client.ios.tunnel</key>
-        <string>${{ env.EXT_UUID }}</string>
+        <string>$EXT_UUID</string>
     </dict>
 </dict>
 EOF
