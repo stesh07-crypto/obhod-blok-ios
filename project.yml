@@ -57,8 +57,7 @@ targets:
       - target: TunnelExtension
       - framework: Frameworks/libwdttclient.xcframework
         embed: false
-    entitlements:
-      path: OBhoD/App/OBhoD.entitlements
+    entitlements: OBhoD/App/OBhoD.entitlements
 
   # ── Network Extension ──────────────────────────────────────────────────
   TunnelExtension:
@@ -90,5 +89,4 @@ targets:
     dependencies:
       - framework: Frameworks/libwdttclient.xcframework
         embed: false
-    entitlements:
-      path: TunnelExtension/TunnelExtension.entitlements
+    entitlements: TunnelExtension/TunnelExtension.entitlements
