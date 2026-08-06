@@ -114,9 +114,9 @@ jobs:
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
             2>&1 | tee /tmp/archive.log
-          if grep -q 'ARCHIVE FAILED' /tmp/archive.log; then
-            echo '=== ARCHIVE FAILED - full error context ==='
-            grep -A5 -B5 'error:' /tmp/archive.log | tail -50
+          if grep -q 'ARCHIVE FAILED' /tmp/archive.log || [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo '=== ARCHIVE FAILED - full log tail ==='
+            tail -n 150 /tmp/archive.log
             exit 1
           fi
 
