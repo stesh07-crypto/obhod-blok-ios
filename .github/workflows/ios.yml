@@ -141,6 +141,12 @@ jobs:
             exit 1
           fi
 
+          echo "=== ARCHIVED APP ENTITLEMENTS ==="
+          codesign -d --entitlements :- "$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app" || true
+
+          echo "=== ARCHIVED EXTENSION ENTITLEMENTS ==="
+          codesign -d --entitlements :- "$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app/PlugIns/TunnelExtension.appex" || true
+
       - name: Rename IPA
         run: |
           echo "Export directory contents:"
