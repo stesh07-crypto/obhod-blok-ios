@@ -49,6 +49,7 @@ targets:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Apple Distribution
           PROVISIONING_PROFILE_SPECIFIER: OBhod_app
+          CODE_SIGN_ENTITLEMENTS: OBhoD/App/OBhoD.entitlements
     dependencies:
       - target: TunnelExtension
       - framework: Frameworks/libwdttclient.xcframework
@@ -79,6 +80,7 @@ targets:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Apple Distribution
           PROVISIONING_PROFILE_SPECIFIER: OBhod_ext
+          CODE_SIGN_ENTITLEMENTS: TunnelExtension/TunnelExtension.entitlements
     dependencies:
       - framework: Frameworks/libwdttclient.xcframework
         embed: false
