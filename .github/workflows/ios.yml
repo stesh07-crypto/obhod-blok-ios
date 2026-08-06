@@ -42,11 +42,10 @@ jobs:
         run: |
           echo "=== Available Xcode versions ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || true
-          # Pick the highest stable Xcode_16.x.y (avoid the Xcode_16.app symlink)
-          XCODE_PATH=$(ls -d /Applications/Xcode_16.[0-9]*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$XCODE_PATH" ] || [ ! -d "${XCODE_PATH}/Contents/Developer" ]; then
-            # Fallback: use whatever xcode-select already points to
-            XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
+          if [ -d "/Applications/Xcode_26.3.0.app/Contents/Developer" ]; then
+            XCODE_PATH="/Applications/Xcode_26.3.0.app"
+          else
+            XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
           fi
           DEV_DIR="${XCODE_PATH}/Contents/Developer"
           echo "Using Xcode: $XCODE_PATH"
@@ -104,13 +103,14 @@ jobs:
           echo "APP_UUID=${APP_UUID}" >> $GITHUB_ENV
           echo "EXT_UUID=${EXT_UUID}" >> $GITHUB_ENV
 
-          echo "=== APP PROVISIONING PROFILE INFO (UUID: $APP_UUID) ==="
-          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A2 '<key>Name</key>' || true
-          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A15 '<key>Entitlements</key>' || true
+          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" > /tmp/app.plist
+          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" > /tmp/ext.plist
 
-          echo "=== EXT PROVISIONING PROFILE INFO (UUID: $EXT_UUID) ==="
-          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A2 '<key>Name</key>' || true
-          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A15 '<key>Entitlements</key>' || true
+          echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (UUID: $APP_UUID) ==="
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/app.plist || true
+
+          echo "=== EXT PROVISIONING PROFILE ENTITLEMENTS (UUID: $EXT_UUID) ==="
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/ext.plist || true
 
       - name: Build archive
         run: |
@@ -121,13 +121,6 @@ jobs:
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -destination "generic/platform=iOS" \
-            PROVISIONING_PROFILE_SPECIFIER:OBhoD="OBhod_app" \
-            PROVISIONING_PROFILE:OBhoD="$APP_UUID" \
-            PROVISIONING_PROFILE_SPECIFIER:TunnelExtension="OBhod_ext" \
-            PROVISIONING_PROFILE:TunnelExtension="$EXT_UUID" \
-            CODE_SIGN_STYLE="Manual" \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            DEVELOPMENT_TEAM="4Z5K8Y686M" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
