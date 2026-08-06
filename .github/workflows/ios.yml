@@ -23,7 +23,7 @@ env:
 jobs:
   build-and-upload:
     name: Build iOS App & Upload to TestFlight
-    runs-on: macos-15   # Xcode 16 with iOS 18 SDK
+    runs-on: macos-15-xlarge   # Xcode 16 with iOS 18 SDK
 
     steps:
       - name: Checkout repository
@@ -40,19 +40,17 @@ jobs:
       - name: Select Xcode
         run: |
           echo "=== Available Xcode versions ==="
-          ls -d /Applications/Xcode*.app
-          XCODE_PATH="/Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer"
-          if [ ! -d "$XCODE_PATH" ]; then
-            XCODE_PATH="/Applications/Xcode_16.2.app/Contents/Developer"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          # Pick the highest stable Xcode_16.x.y (avoid the Xcode_16.app symlink)
+          XCODE_PATH=$(ls -d /Applications/Xcode_16.[0-9]*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ] || [ ! -d "${XCODE_PATH}/Contents/Developer" ]; then
+            # Fallback: use whatever xcode-select already points to
+            XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
           fi
-          if [ ! -d "$XCODE_PATH" ]; then
-            XCODE_PATH="/Applications/Xcode_16.1.app/Contents/Developer"
-          fi
-          if [ ! -d "$XCODE_PATH" ]; then
-            XCODE_PATH="/Applications/Xcode_16.0.app/Contents/Developer"
-          fi
-          sudo xcode-select -s "$XCODE_PATH"
-          echo "DEVELOPER_DIR=$XCODE_PATH" >> $GITHUB_ENV
+          DEV_DIR="${XCODE_PATH}/Contents/Developer"
+          echo "Using Xcode: $XCODE_PATH"
+          sudo xcode-select -s "$DEV_DIR"
+          echo "DEVELOPER_DIR=$DEV_DIR" >> $GITHUB_ENV
           xcodebuild -version
           xcodebuild -showsdks
 
@@ -102,7 +100,7 @@ jobs:
         run: |
           set -o pipefail
           # Determine SDK version dynamically
-          SDK_VER=$(xcodebuild -showsdks 2>/dev/null | grep iphoneos | grep -oE 'iphoneos[0-9.]+' | tail -1)
+          SDK_VER=$(xcodebuild -showsdks 2>/dev/null | grep '^    iOS ' | grep -oE 'iphoneos[0-9.]+' | tail -1)
           echo "Using SDK: $SDK_VER"
           xcodebuild archive \
             -sdk "${SDK_VER:-iphoneos}" \
@@ -114,6 +112,7 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
+            ENABLE_ON_DEMAND_RESOURCES=NO \
             2>&1 | tee /tmp/archive.log
           if grep -q 'ARCHIVE FAILED' /tmp/archive.log; then
             echo '=== ARCHIVE FAILED - full error context ==='
