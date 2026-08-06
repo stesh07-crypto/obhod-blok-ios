@@ -10,7 +10,7 @@ on:
       upload_testflight:
         description: 'Upload to TestFlight'
         required: false
-        default: 'true'
+        default: true
         type: boolean
 
 env:
