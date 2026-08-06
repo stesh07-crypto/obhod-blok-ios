@@ -91,11 +91,22 @@ jobs:
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
-          echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode \
-            -o "$PP_DIR/obhod_app.mobileprovision"
+          echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
+          echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
 
-          echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode \
-            -o "$PP_DIR/obhod_ext.mobileprovision"
+          APP_UUID=$(security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          EXT_UUID=$(security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+
+          if [ -n "$APP_UUID" ]; then cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"; fi
+          if [ -n "$EXT_UUID" ]; then cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"; fi
+
+          echo "=== APP PROVISIONING PROFILE INFO (UUID: $APP_UUID) ==="
+          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A2 '<key>Name</key>' || true
+          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A15 '<key>Entitlements</key>' || true
+
+          echo "=== EXT PROVISIONING PROFILE INFO (UUID: $EXT_UUID) ==="
+          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A2 '<key>Name</key>' || true
+          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A15 '<key>Entitlements</key>' || true
 
       - name: Build archive
         run: |
