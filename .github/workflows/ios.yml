@@ -42,17 +42,12 @@ jobs:
         run: |
           echo "=== Available Xcode versions ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || true
-          if [ -d "/Applications/Xcode_26.3.0.app/Contents/Developer" ]; then
-            XCODE_PATH="/Applications/Xcode_26.3.0.app"
-          else
-            XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-          fi
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
           DEV_DIR="${XCODE_PATH}/Contents/Developer"
           echo "Using Xcode: $XCODE_PATH"
           sudo xcode-select -s "$DEV_DIR"
           echo "DEVELOPER_DIR=$DEV_DIR" >> $GITHUB_ENV
           xcodebuild -version
-          xcodebuild -showsdks
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -67,21 +62,21 @@ jobs:
 
       - name: Import signing certificate
         env:
-          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
-          security import "$RUNNER_TEMP/certificate.p12" \
-            -P "$CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$DISTRIBUTION_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign -t agg
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          security list-keychains -s "$KEYCHAIN_PATH" $(security list-keychains | tr -d '"')
+          security default-keychain -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
         env:
@@ -103,13 +98,12 @@ jobs:
           echo "APP_UUID=${APP_UUID}" >> $GITHUB_ENV
           echo "EXT_UUID=${EXT_UUID}" >> $GITHUB_ENV
 
+          echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
           security cms -D -i "$PP_DIR/obhod_app.mobileprovision" > /tmp/app.plist
-          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" > /tmp/ext.plist
-
-          echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (UUID: $APP_UUID) ==="
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/app.plist || true
 
-          echo "=== EXT PROVISIONING PROFILE ENTITLEMENTS (UUID: $EXT_UUID) ==="
+          echo "=== EXT PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
+          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" > /tmp/ext.plist
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/ext.plist || true
 
       - name: Build archive
