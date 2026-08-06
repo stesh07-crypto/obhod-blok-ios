@@ -156,6 +156,16 @@ jobs:
           FINAL_NAME="OBhoD-ios-${VERSION}-b${BUILD}.ipa"
           FOUND_IPA=$(find "$RUNNER_TEMP/export" -name "*.ipa" | head -1)
           echo "Found IPA: $FOUND_IPA"
+
+          mkdir -p "$RUNNER_TEMP/ipa_inspect"
+          unzip -q "$FOUND_IPA" -d "$RUNNER_TEMP/ipa_inspect"
+
+          echo "=== EXPORTED IPA MAIN APP ENTITLEMENTS ==="
+          codesign -d --entitlements :- "$RUNNER_TEMP/ipa_inspect/Payload/OBhoD.app" || true
+
+          echo "=== EXPORTED IPA TUNNEL EXTENSION ENTITLEMENTS ==="
+          codesign -d --entitlements :- "$RUNNER_TEMP/ipa_inspect/Payload/OBhoD.app/PlugIns/TunnelExtension.appex" || true
+
           mv "$FOUND_IPA" "$RUNNER_TEMP/export/${FINAL_NAME}"
           echo "IPA_PATH=$RUNNER_TEMP/export/${FINAL_NAME}" >> $GITHUB_ENV
           echo "IPA_NAME=${FINAL_NAME}" >> $GITHUB_ENV
