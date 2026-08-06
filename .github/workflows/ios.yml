@@ -34,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26'
           cache-dependency-path: go_client/go.sum
 
       - name: Select Xcode
@@ -79,7 +79,8 @@ jobs:
           echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
           security import "$RUNNER_TEMP/certificate.p12" \
             -P "$CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
@@ -104,6 +105,7 @@ jobs:
             -scheme "${{ env.SCHEME }}" \
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
+            -destination "generic/platform=iOS" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
@@ -168,7 +170,6 @@ jobs:
             --file "${{ env.IPA_PATH }}" \
             --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
-            --private-key "$KEY_PATH" \
             --verbose
 
       - name: Cleanup keychain
