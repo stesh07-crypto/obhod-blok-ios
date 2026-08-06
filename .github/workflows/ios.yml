@@ -162,6 +162,7 @@ jobs:
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ env.IPA_NAME }}
           path: ${{ env.IPA_PATH }}
