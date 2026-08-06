@@ -151,6 +151,13 @@ jobs:
         run: |
           echo "Export directory contents:"
           ls -la "$RUNNER_TEMP/export/" || true
+
+          echo "=== EXPORT OPTIONS PLIST ==="
+          cat "$RUNNER_TEMP/export/ExportOptions.plist" || true
+
+          echo "=== DISTRIBUTION SUMMARY PLIST ==="
+          cat "$RUNNER_TEMP/export/DistributionSummary.plist" || true
+
           VERSION=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleShortVersionString | grep -oE '[0-9.]+' | head -1)
           BUILD=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleVersion | grep -oE '[0-9]+' | head -1)
           FINAL_NAME="OBhoD-ios-${VERSION}-b${BUILD}.ipa"
