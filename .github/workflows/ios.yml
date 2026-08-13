@@ -88,17 +88,58 @@ jobs:
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Decode and import p12 certificate using python (avoids BSD base64 syntax issues)
-          python3 -c "import base64, os; open('$RUNNER_TEMP/certificate.p12', 'wb').write(base64.b64decode(os.environ['CERTIFICATE_BASE64'].strip()))"
-          echo "Decoded certificate.p12 size: $(ls -lh $RUNNER_TEMP/certificate.p12)"
+          # 2. Native macOS LibreSSL conversion & import
+          python3 - << 'EOF'
+          import base64, os, subprocess
+          from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
+          from cryptography.hazmat.primitives import serialization
 
-          CERT_PASS="${CERTIFICATE_PASSWORD:-}"
-          security import "$RUNNER_TEMP/certificate.p12" \
-            -P "$CERT_PASS" \
+          raw_b64 = os.environ.get('CERTIFICATE_BASE64', '').strip()
+          raw_data = base64.b64decode(raw_b64)
+
+          key_pem = None
+          cert_pem = None
+
+          # Try loading PKCS12
+          for pass_candidate in [b"", b"buildpassword123", os.environ.get('CERTIFICATE_PASSWORD', '').encode()]:
+              try:
+                  p12_obj = pkcs12.load_pkcs12(raw_data, pass_candidate)
+                  if p12_obj.key:
+                      key_pem = p12_obj.key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+                  if p12_obj.cert:
+                      cert_pem = p12_obj.cert.certificate.public_bytes(Encoding.PEM)
+                  if key_pem and cert_pem:
+                      break
+              except Exception:
+                  pass
+
+          runner_temp = os.environ.get('RUNNER_TEMP', '/tmp')
+          key_path = os.path.join(runner_temp, 'key.pem')
+          cert_path = os.path.join(runner_temp, 'cert.pem')
+          out_p12 = os.path.join(runner_temp, 'certificate_native.p12')
+
+          if key_pem and cert_pem:
+              with open(key_path, 'wb') as f:
+                  f.write(key_pem)
+              with open(cert_path, 'wb') as f:
+                  f.write(cert_pem)
+              # Create legacy p12 using macOS native LibreSSL
+              subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', key_path, '-in', cert_path, '-out', out_p12, '-passout', 'pass:buildpassword123', '-name', 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'], check=True)
+              print("Successfully created native macOS PKCS12!")
+          else:
+              # Save directly if raw_data was already DER or PEM
+              with open(out_p12, 'wb') as f:
+                  f.write(raw_data)
+          EOF
+
+          security import "$RUNNER_TEMP/certificate_native.p12" \
+            -P "buildpassword123" \
             -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
-          security import "$RUNNER_TEMP/certificate.p12" \
+          security import "$RUNNER_TEMP/certificate_native.p12" \
             -P "" \
-            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+          security import "$RUNNER_TEMP/certificate_native.p12" \
+            -A -T /usr/bin/codesign -k "$KEYCHAIN_PATH"
 
           # 3. Set partition list and default keychain
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
