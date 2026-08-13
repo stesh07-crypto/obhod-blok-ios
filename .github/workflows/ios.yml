@@ -88,8 +88,10 @@ jobs:
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Decode and import p12 certificate
-          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          # 2. Decode and import p12 certificate using python (avoids BSD base64 syntax issues)
+          python3 -c "import base64, os; open('$RUNNER_TEMP/certificate.p12', 'wb').write(base64.b64decode(os.environ['CERTIFICATE_BASE64'].strip()))"
+          echo "Decoded certificate.p12 size: $(ls -lh $RUNNER_TEMP/certificate.p12)"
+
           CERT_PASS="${CERTIFICATE_PASSWORD:-}"
           security import "$RUNNER_TEMP/certificate.p12" \
             -P "$CERT_PASS" \
@@ -120,11 +122,11 @@ jobs:
           mkdir -p "$PP_DIR"
 
           # 1. Main App Profile
-          echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
+          python3 -c "import base64, os; open('$PP_DIR/obhod_app.mobileprovision', 'wb').write(base64.b64decode(os.environ['APP_PROVISIONING_PROFILE_BASE64'].strip()))"
           cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/OBhod_app.mobileprovision"
 
           # 2. Extension Profile
-          echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
+          python3 -c "import base64, os; open('$PP_DIR/obhod_ext.mobileprovision', 'wb').write(base64.b64decode(os.environ['EXT_PROVISIONING_PROFILE_BASE64'].strip()))"
           cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision"
 
           # 3. Copy by UUID (required by modern Xcode)
@@ -216,7 +218,7 @@ jobs:
           KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
 
           if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
-            echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+            python3 -c "import base64, os; open('$KEY_PATH', 'wb').write(base64.b64decode(os.environ['APP_STORE_CONNECT_API_KEY_BASE64'].strip()))"
           fi
 
           if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ] || [ ! -f "$KEY_PATH" ]; then
