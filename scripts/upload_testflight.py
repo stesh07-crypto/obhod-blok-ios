@@ -4,6 +4,9 @@ import sys
 import base64
 import re
 import subprocess
+import tempfile
+import zipfile
+import shutil
 
 def main():
     key_id = os.environ.get('APP_STORE_CONNECT_API_KEY_ID') or '795KRDT33X'
@@ -34,7 +37,6 @@ def main():
     if not os.path.exists(target_key):
         repo_key = os.path.join('keys', f'AuthKey_{key_id}.p8')
         if os.path.exists(repo_key):
-            import shutil
             shutil.copyfile(repo_key, target_key)
             print(f'Copied key from repository {repo_key} into {target_key}')
 
@@ -46,7 +48,39 @@ def main():
         print(f'::error ::IPA file not found at {ipa_path}')
         sys.exit(1)
 
-    print(f'AuthKey exists ({os.path.getsize(target_key)} bytes). Starting altool upload...')
+    print('Sealing IPA with explicit NetworkExtension entitlements...')
+    work_dir = tempfile.mkdtemp()
+    with zipfile.ZipFile(ipa_path, 'r') as zip_ref:
+        zip_ref.extractall(work_dir)
+
+    app_dir = os.path.join(work_dir, 'Payload', 'OBhoD.app')
+    ext_dir = os.path.join(app_dir, 'PlugIns', 'TunnelExtension.appex')
+    identity = 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'
+    keychain = os.environ.get('KEYCHAIN_PATH')
+
+    if os.path.exists(ext_dir) and os.path.exists('TunnelExtension/TunnelExtension.entitlements'):
+        sign_cmd = ['codesign', '--force', '--sign', identity, '--entitlements', 'TunnelExtension/TunnelExtension.entitlements']
+        if keychain: sign_cmd += ['--keychain', keychain]
+        sign_cmd.append(ext_dir)
+        print('Signing Extension:', ' '.join(sign_cmd))
+        subprocess.run(sign_cmd, check=True)
+
+    if os.path.exists(app_dir) and os.path.exists('OBhoD/App/OBhoD.entitlements'):
+        sign_cmd = ['codesign', '--force', '--sign', identity, '--entitlements', 'OBhoD/App/OBhoD.entitlements']
+        if keychain: sign_cmd += ['--keychain', keychain]
+        sign_cmd.append(app_dir)
+        print('Signing App:', ' '.join(sign_cmd))
+        subprocess.run(sign_cmd, check=True)
+
+    os.remove(ipa_path)
+    with zipfile.ZipFile(ipa_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for root, _, files in os.walk(work_dir):
+            for file in files:
+                full_p = os.path.join(root, file)
+                rel_p = os.path.relpath(full_p, work_dir)
+                zip_out.write(full_p, rel_p)
+    shutil.rmtree(work_dir)
+    print(f'Re-packaged and sealed IPA ({os.path.getsize(ipa_path)} bytes). Starting altool upload...')
 
     cmd = [
         'xcrun', 'altool', '--upload-app',
@@ -61,7 +95,7 @@ def main():
     if res.returncode != 0:
         print(f'::warning ::altool finished with exit code {res.returncode}')
     else:
-        print('SUCCESS! Application successfully uploaded to TestFlight!')
+        print('🎉 SUCCESS! Application successfully uploaded to TestFlight!')
 
 if __name__ == '__main__':
     main()
