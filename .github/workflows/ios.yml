@@ -129,7 +129,6 @@ jobs:
               subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', key_path, '-in', cert_path, '-out', out_p12, '-passout', 'pass:buildpassword123', '-name', 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'], check=True)
               print("Successfully created native macOS PKCS12!")
           else:
-              # Save directly if raw_data was already DER or PEM
               with open(out_p12, 'wb') as f:
                   f.write(raw_data)
           EOF
@@ -153,36 +152,39 @@ jobs:
 
       - name: Install provisioning profiles
         env:
-          APP_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
-          EXT_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_EXT_PROVISIONING_PROFILE_BASE64 }}
+          APP_B64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
+          EXT_B64: ${{ secrets.IOS_EXT_PROVISIONING_PROFILE_BASE64 }}
         run: |
-          if [ -z "$APP_PROVISIONING_PROFILE_BASE64" ] || [ -z "$EXT_PROVISIONING_PROFILE_BASE64" ]; then
-            echo "::error ::Секреты IOS_APP_PROVISIONING_PROFILE_BASE64 или IOS_EXT_PROVISIONING_PROFILE_BASE64 не установлены в Settings -> Secrets. Скопируйте их из файла GITHUB_SECRETS_READY.md"
-            exit 1
-          fi
-
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
-          # Clean and decode App & Ext profiles reliably
-          python3 - << 'EOF'
-          import base64, os, re
+          # 1. Main App Profile (from repository or fallback to secret)
+          if [ -f "provisioning/OBhod_app.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_app.mobileprovision" "$PP_DIR/app_raw.mobileprovision"
+            echo "Used provisioning/OBhod_app.mobileprovision from repository"
+          else
+            python3 -c "
+            import base64, os, re
+            raw = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_B64', ''))
+            if len(raw) % 4 != 0: raw += '=' * (4 - len(raw) % 4)
+            open('$PP_DIR/app_raw.mobileprovision', 'wb').write(base64.b64decode(raw))
+            "
+          fi
 
-          def decode_clean(env_var, out_path):
-              raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get(env_var, ''))
-              if len(raw_str) % 4 != 0:
-                  raw_str += '=' * (4 - len(raw_str) % 4)
-              data = base64.b64decode(raw_str)
-              with open(out_path, 'wb') as f:
-                  f.write(data)
-              print(f"Decoded {env_var} to {out_path} (size: {len(data)} bytes)")
+          # 2. Extension Profile (from repository or fallback to secret)
+          if [ -f "provisioning/OBhod_ext.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_ext.mobileprovision" "$PP_DIR/ext_raw.mobileprovision"
+            echo "Used provisioning/OBhod_ext.mobileprovision from repository"
+          else
+            python3 -c "
+            import base64, os, re
+            raw = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('EXT_B64', ''))
+            if len(raw) % 4 != 0: raw += '=' * (4 - len(raw) % 4)
+            open('$PP_DIR/ext_raw.mobileprovision', 'wb').write(base64.b64decode(raw))
+            "
+          fi
 
-          pp_dir = os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')
-          decode_clean('APP_PROVISIONING_PROFILE_BASE64', os.path.join(pp_dir, 'app_raw.mobileprovision'))
-          decode_clean('EXT_PROVISIONING_PROFILE_BASE64', os.path.join(pp_dir, 'ext_raw.mobileprovision'))
-          EOF
-
-          # Copy by UUID (required by Xcode codesign)
+          # 3. Copy by UUID (required by Xcode codesign)
           APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
@@ -281,7 +283,7 @@ jobs:
             import base64, os, re
             raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
             if len(raw_str) % 4 != 0: raw_str += '=' * (4 - len(raw_str) % 4)
-            with open('$KEY_PATH', 'wb') as f: f.write(base64.b64decode(raw_str))
+            with open('$KEY_PATH', 'wb').write(base64.b64decode(raw_str))
             "
           fi
 
