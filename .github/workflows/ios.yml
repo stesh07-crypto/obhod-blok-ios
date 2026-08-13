@@ -90,12 +90,14 @@ jobs:
 
           # 2. Native macOS LibreSSL conversion & import
           python3 - << 'EOF'
-          import base64, os, subprocess
+          import base64, os, re, subprocess
           from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
           from cryptography.hazmat.primitives import serialization
 
-          raw_b64 = os.environ.get('CERTIFICATE_BASE64', '').strip()
-          raw_data = base64.b64decode(raw_b64)
+          raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('CERTIFICATE_BASE64', ''))
+          if len(raw_str) % 4 != 0:
+              raw_str += '=' * (4 - len(raw_str) % 4)
+          raw_data = base64.b64decode(raw_str)
 
           key_pem = None
           cert_pem = None
@@ -162,13 +164,25 @@ jobs:
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
-          # 1. Main App Profile
-          python3 -c "import base64, os; open('$PP_DIR/app_raw.mobileprovision', 'wb').write(base64.b64decode(os.environ['APP_PROVISIONING_PROFILE_BASE64'].strip()))"
+          # Clean and decode App & Ext profiles reliably
+          python3 - << 'EOF'
+          import base64, os, re
 
-          # 2. Extension Profile
-          python3 -c "import base64, os; open('$PP_DIR/ext_raw.mobileprovision', 'wb').write(base64.b64decode(os.environ['EXT_PROVISIONING_PROFILE_BASE64'].strip()))"
+          def decode_clean(env_var, out_path):
+              raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get(env_var, ''))
+              if len(raw_str) % 4 != 0:
+                  raw_str += '=' * (4 - len(raw_str) % 4)
+              data = base64.b64decode(raw_str)
+              with open(out_path, 'wb') as f:
+                  f.write(data)
+              print(f"Decoded {env_var} to {out_path} (size: {len(data)} bytes)")
 
-          # 3. Copy by UUID (required by Xcode codesign)
+          pp_dir = os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')
+          decode_clean('APP_PROVISIONING_PROFILE_BASE64', os.path.join(pp_dir, 'app_raw.mobileprovision'))
+          decode_clean('EXT_PROVISIONING_PROFILE_BASE64', os.path.join(pp_dir, 'ext_raw.mobileprovision'))
+          EOF
+
+          # Copy by UUID (required by Xcode codesign)
           APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
@@ -263,7 +277,12 @@ jobs:
           KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
 
           if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
-            python3 -c "import base64, os; open('$KEY_PATH', 'wb').write(base64.b64decode(os.environ['APP_STORE_CONNECT_API_KEY_BASE64'].strip()))"
+            python3 -c "
+            import base64, os, re
+            raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
+            if len(raw_str) % 4 != 0: raw_str += '=' * (4 - len(raw_str) % 4)
+            with open('$KEY_PATH', 'wb') as f: f.write(base64.b64decode(raw_str))
+            "
           fi
 
           if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ] || [ ! -f "$KEY_PATH" ]; then
