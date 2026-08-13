@@ -288,3 +288,10 @@ enum SubscriptionError: LocalizedError {
         }
     }
 }
+
+// MARK: – Notification Names
+
+extension Notification.Name {
+    static let beginImportFromURL = Notification.Name("beginImportFromURL")
+}
+
