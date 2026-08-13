@@ -163,26 +163,30 @@ jobs:
           mkdir -p "$PP_DIR"
 
           # 1. Main App Profile
-          python3 -c "import base64, os; open('$PP_DIR/obhod_app.mobileprovision', 'wb').write(base64.b64decode(os.environ['APP_PROVISIONING_PROFILE_BASE64'].strip()))"
-          cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/OBhod_app.mobileprovision"
+          python3 -c "import base64, os; open('$PP_DIR/app_raw.mobileprovision', 'wb').write(base64.b64decode(os.environ['APP_PROVISIONING_PROFILE_BASE64'].strip()))"
 
           # 2. Extension Profile
-          python3 -c "import base64, os; open('$PP_DIR/obhod_ext.mobileprovision', 'wb').write(base64.b64decode(os.environ['EXT_PROVISIONING_PROFILE_BASE64'].strip()))"
-          cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision"
+          python3 -c "import base64, os; open('$PP_DIR/ext_raw.mobileprovision', 'wb').write(base64.b64decode(os.environ['EXT_PROVISIONING_PROFILE_BASE64'].strip()))"
 
-          # 3. Copy by UUID (required by modern Xcode)
-          APP_UUID=$(security cms -D -i "$PP_DIR/obhod_app.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
-          EXT_UUID=$(security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          # 3. Copy by UUID (required by Xcode codesign)
+          APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
-          if [ -n "$APP_UUID" ]; then cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"; fi
-          if [ -n "$EXT_UUID" ]; then cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"; fi
+          if [ -n "$APP_UUID" ]; then
+            cp -f "$PP_DIR/app_raw.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"
+            echo "Installed App profile UUID: $APP_UUID"
+          fi
+          if [ -n "$EXT_UUID" ]; then
+            cp -f "$PP_DIR/ext_raw.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"
+            echo "Installed Ext profile UUID: $EXT_UUID"
+          fi
 
           echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
-          security cms -D -i "$PP_DIR/obhod_app.mobileprovision" > /tmp/app.plist 2>/dev/null || true
+          security cms -D -i "$PP_DIR/app_raw.mobileprovision" > /tmp/app.plist 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/app.plist 2>/dev/null || true
 
           echo "=== EXT PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
-          security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" > /tmp/ext.plist 2>/dev/null || true
+          security cms -D -i "$PP_DIR/ext_raw.mobileprovision" > /tmp/ext.plist 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/ext.plist 2>/dev/null || true
 
       - name: Build archive
