@@ -69,45 +69,47 @@ jobs:
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
           KEY_PASS="${KEYCHAIN_PASSWORD:-buildpassword123}"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
           security create-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          # 1. Import DER certificate directly
-          if [ -f "keys/distribution.cer" ]; then
-            echo "Importing keys/distribution.cer..."
-            security import "keys/distribution.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
-            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem" 2>/dev/null || true
-            security import "$RUNNER_TEMP/cert.pem" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign 2>/dev/null || true
-          fi
+          # 1. Apple WWDR Intermediate Certificates (ensure certificate chain of trust)
+          echo "Downloading Apple WWDR CA..."
+          curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer" -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" || true
+          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
+          security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Convert and import RSA private key
-          if [ -f "keys/ios_distribution.key" ]; then
-            echo "Importing RSA private key..."
-            openssl rsa -in keys/ios_distribution.key -out "$RUNNER_TEMP/key_rsa.pem" 2>/dev/null || cp keys/ios_distribution.key "$RUNNER_TEMP/key_rsa.pem"
-            security import "$RUNNER_TEMP/key_rsa.pem" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
-          fi
+          # 2. Convert DER certificate to PEM & PKCS#8 key to RSA PEM
+          if [ -f "keys/distribution.cer" ] && [ -f "keys/ios_distribution.key" ]; then
+            echo "Creating native macOS PKCS#12 from keys/distribution.cer + keys/ios_distribution.key..."
+            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem"
+            openssl rsa -in keys/ios_distribution.key -out "$RUNNER_TEMP/key_rsa.pem"
+            
+            # Export via macOS LibreSSL (natively supported by Security framework)
+            openssl pkcs12 -export \
+              -inkey "$RUNNER_TEMP/key_rsa.pem" \
+              -in "$RUNNER_TEMP/cert.pem" \
+              -out "$RUNNER_TEMP/libressl_cert.p12" \
+              -passout pass:"$KEY_PASS" \
+              -name "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)"
 
-          # 3. Import certificate.p12 (both with and without password)
-          if [ -f "keys/certificate.p12" ]; then
-            echo "Importing keys/certificate.p12..."
-            security import "keys/certificate.p12" -P "" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
-            security import "keys/certificate.p12" -P "${CERTIFICATE_PASSWORD:-buildpassword123}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
-          fi
-
-          # 4. Import from secret if provided
-          if [ -n "$CERTIFICATE_BASE64" ]; then
+            security import "$RUNNER_TEMP/libressl_cert.p12" \
+              -P "$KEY_PASS" \
+              -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+          elif [ -n "$CERTIFICATE_BASE64" ]; then
             echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/secret.p12"
-            security import "$RUNNER_TEMP/secret.p12" -P "${CERTIFICATE_PASSWORD:-}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
-            security import "$RUNNER_TEMP/secret.p12" -P "" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
+            security import "$RUNNER_TEMP/secret.p12" -P "${CERTIFICATE_PASSWORD:-}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
           fi
 
-          # 5. Set key partition list so codesign can use private keys without interactive prompt
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH" || true
+          # 3. Set partition list so codesign can access private key without prompt
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
-          echo "=== IMPORTED CODESIGNING IDENTITIES ==="
+          echo "=== VERIFY IMPORTED SIGNING IDENTITIES ==="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
@@ -158,6 +160,7 @@ jobs:
             -configuration "${{ env.CONFIGURATION }}" \
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -destination "generic/platform=iOS" \
+            OTHER_CODE_SIGN_FLAGS="--keychain ${{ env.KEYCHAIN_PATH }}" \
             SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
             EXCLUDED_ARCHS="x86_64" \
             ENABLE_ON_DEMAND_RESOURCES=NO \
@@ -175,6 +178,7 @@ jobs:
             -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
             -exportPath "$RUNNER_TEMP/export" \
             -exportOptionsPlist "scripts/export.plist" \
+            OTHER_CODE_SIGN_FLAGS="--keychain ${{ env.KEYCHAIN_PATH }}" \
             2>&1 | tee /tmp/export.log
           if grep -q 'EXPORT FAILED' /tmp/export.log; then
             echo '=== EXPORT FAILED - error context ==='
