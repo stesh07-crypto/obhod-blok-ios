@@ -280,11 +280,11 @@ jobs:
 
           if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
             python3 -c "
-            import base64, os, re
-            raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
-            if len(raw_str) % 4 != 0: raw_str += '=' * (4 - len(raw_str) % 4)
-            with open('$KEY_PATH', 'wb').write(base64.b64decode(raw_str))
-            "
+import base64, os, re
+raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
+if len(raw_str) % 4 != 0: raw_str += '=' * (4 - len(raw_str) % 4)
+open('$KEY_PATH', 'wb').write(base64.b64decode(raw_str))
+"
           fi
 
           if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ] || [ ! -f "$KEY_PATH" ]; then
