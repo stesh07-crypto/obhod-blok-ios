@@ -4,3 +4,7 @@ keys/
 *.xcodeproj
 Frameworks/libwdttclient.xcframework
 .DS_Store
+
+build_artifacts/
+*.ipa
+*.zip
