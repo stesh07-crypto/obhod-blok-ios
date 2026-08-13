@@ -75,36 +75,44 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          # 1. Apple WWDR Intermediate Certificates (ensure certificate chain of trust)
+          # 1. Apple WWDR Intermediate Certificates
           echo "Downloading Apple WWDR CA..."
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer" -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Convert DER certificate to PEM & PKCS#8 key to RSA PEM
-          if [ -f "keys/distribution.cer" ] && [ -f "keys/ios_distribution.key" ]; then
-            echo "Creating native macOS PKCS#12 from keys/distribution.cer + keys/ios_distribution.key..."
-            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem"
-            openssl rsa -in keys/ios_distribution.key -out "$RUNNER_TEMP/key_rsa.pem"
-            
-            # Export via macOS LibreSSL (natively supported by Security framework)
-            openssl pkcs12 -export \
-              -inkey "$RUNNER_TEMP/key_rsa.pem" \
-              -in "$RUNNER_TEMP/cert.pem" \
-              -out "$RUNNER_TEMP/libressl_cert.p12" \
-              -passout pass:"$KEY_PASS" \
-              -name "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)"
+          # 2. Build unencrypted PKCS12 using Python cryptography
+          python3 -m pip install --quiet cryptography || true
+          python3 -c "
+          from cryptography import x509
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.serialization import pkcs12
+          from cryptography.hazmat.backends import default_backend
 
-            security import "$RUNNER_TEMP/libressl_cert.p12" \
-              -P "$KEY_PASS" \
-              -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
-          elif [ -n "$CERTIFICATE_BASE64" ]; then
-            echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/secret.p12"
-            security import "$RUNNER_TEMP/secret.p12" -P "${CERTIFICATE_PASSWORD:-}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
-          fi
+          with open('keys/distribution.cer', 'rb') as f:
+              cert = x509.load_der_x509_certificate(f.read(), default_backend())
+          with open('keys/ios_distribution.key', 'rb') as f:
+              key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
 
-          # 3. Set partition list so codesign can access private key without prompt
+          p12 = pkcs12.serialize_key_and_certificates(
+              name=b'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)',
+              key=key,
+              cert=cert,
+              cas=None,
+              encryption_algorithm=serialization.NoEncryption()
+          )
+          with open('$RUNNER_TEMP/unencrypted.p12', 'wb') as f:
+              f.write(p12)
+          print('Created unencrypted.p12 successfully')
+          "
+
+          # 3. Import unencrypted PKCS12 directly into keychain
+          security import "$RUNNER_TEMP/unencrypted.p12" \
+            -P "" \
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          # 4. Set partition list and default keychain
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
