@@ -73,35 +73,37 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          # 1. Create a 100% legacy-compatible PKCS12 from raw cert + key (most reliable on macOS)
-          if [ -f "keys/distribution.cer" ] && [ -f "keys/ios_distribution.key" ]; then
-            echo "Exporting PKCS12 from keys/distribution.cer + keys/ios_distribution.key..."
-            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem"
-            openssl pkcs12 -export -legacy \
-              -inkey keys/ios_distribution.key \
-              -in "$RUNNER_TEMP/cert.pem" \
-              -name "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
-              -out "$RUNNER_TEMP/certificate.p12" \
-              -password pass:"$KEY_PASS"
-            CERT_PASS="$KEY_PASS"
-          elif [ -n "$CERTIFICATE_BASE64" ]; then
-            echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
-            CERT_PASS="${CERTIFICATE_PASSWORD:-buildpassword123}"
-          elif [ -f "keys/certificate.p12" ]; then
-            cp keys/certificate.p12 "$RUNNER_TEMP/certificate.p12"
-            CERT_PASS="${CERTIFICATE_PASSWORD:-buildpassword123}"
+          # 1. Import DER certificate directly
+          if [ -f "keys/distribution.cer" ]; then
+            echo "Importing keys/distribution.cer..."
+            security import "keys/distribution.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem" 2>/dev/null || true
+            security import "$RUNNER_TEMP/cert.pem" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign 2>/dev/null || true
           fi
 
-          # Import p12 into the keychain
-          security import "$RUNNER_TEMP/certificate.p12" \
-            -P "$CERT_PASS" \
-            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
-          security import "$RUNNER_TEMP/certificate.p12" \
-            -P "" \
-            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+          # 2. Convert and import RSA private key
+          if [ -f "keys/ios_distribution.key" ]; then
+            echo "Importing RSA private key..."
+            openssl rsa -in keys/ios_distribution.key -out "$RUNNER_TEMP/key_rsa.pem" 2>/dev/null || cp keys/ios_distribution.key "$RUNNER_TEMP/key_rsa.pem"
+            security import "$RUNNER_TEMP/key_rsa.pem" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          fi
 
-          # Allow codesign tool to access keychain without prompts
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
+          # 3. Import certificate.p12 (both with and without password)
+          if [ -f "keys/certificate.p12" ]; then
+            echo "Importing keys/certificate.p12..."
+            security import "keys/certificate.p12" -P "" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+            security import "keys/certificate.p12" -P "${CERTIFICATE_PASSWORD:-buildpassword123}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
+          fi
+
+          # 4. Import from secret if provided
+          if [ -n "$CERTIFICATE_BASE64" ]; then
+            echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/secret.p12"
+            security import "$RUNNER_TEMP/secret.p12" -P "${CERTIFICATE_PASSWORD:-}" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+            security import "$RUNNER_TEMP/secret.p12" -P "" -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || true
+          fi
+
+          # 5. Set key partition list so codesign can use private keys without interactive prompt
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH" || true
           security default-keychain -s "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
