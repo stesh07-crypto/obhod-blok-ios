@@ -73,18 +73,40 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          if [ -n "$CERTIFICATE_BASE64" ]; then
+          # 1. Create a 100% legacy-compatible PKCS12 from raw cert + key (most reliable on macOS)
+          if [ -f "keys/distribution.cer" ] && [ -f "keys/ios_distribution.key" ]; then
+            echo "Exporting PKCS12 from keys/distribution.cer + keys/ios_distribution.key..."
+            openssl x509 -inform der -in keys/distribution.cer -out "$RUNNER_TEMP/cert.pem"
+            openssl pkcs12 -export -legacy \
+              -inkey keys/ios_distribution.key \
+              -in "$RUNNER_TEMP/cert.pem" \
+              -name "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+              -out "$RUNNER_TEMP/certificate.p12" \
+              -password pass:"$KEY_PASS"
+            CERT_PASS="$KEY_PASS"
+          elif [ -n "$CERTIFICATE_BASE64" ]; then
             echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+            CERT_PASS="${CERTIFICATE_PASSWORD:-buildpassword123}"
           elif [ -f "keys/certificate.p12" ]; then
             cp keys/certificate.p12 "$RUNNER_TEMP/certificate.p12"
+            CERT_PASS="${CERTIFICATE_PASSWORD:-buildpassword123}"
           fi
 
-          CERT_PASS="${CERTIFICATE_PASSWORD:-}"
+          # Import p12 into the keychain
           security import "$RUNNER_TEMP/certificate.p12" \
             -P "$CERT_PASS" \
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "" \
             -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          # Allow codesign tool to access keychain without prompts
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          echo "=== IMPORTED CODESIGNING IDENTITIES ==="
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
         env:
@@ -110,7 +132,7 @@ jobs:
           fi
           cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision" 2>/dev/null || true
 
-          # 3. Copy by UUID
+          # 3. Copy by UUID (required by modern Xcode)
           APP_UUID=$(security cms -D -i "$PP_DIR/obhod_app.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
@@ -205,7 +227,7 @@ jobs:
           fi
 
           if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ]; then
-            echo "::warning ::APP_STORE_CONNECT_API_ISSUER_ID is not set in secrets. Skipping upload."
+            echo "::warning ::APP_STORE_CONNECT_API_ISSUER_ID is not set in secrets. Skipping TestFlight upload. IPA artifact is saved."
             exit 0
           fi
 
