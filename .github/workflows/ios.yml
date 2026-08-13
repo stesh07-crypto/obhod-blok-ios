@@ -67,10 +67,16 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          if [ -z "$CERTIFICATE_BASE64" ]; then
+            echo "::error ::Секрет IOS_DISTRIBUTION_CERTIFICATE_BASE64 не установлен в Settings -> Secrets. Скопируйте его из файла GITHUB_SECRETS_READY.md"
+            exit 1
+          fi
+
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
           KEY_PASS="${KEYCHAIN_PASSWORD:-buildpassword123}"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
+          # Create and unlock temporary build keychain
           security create-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
@@ -82,37 +88,17 @@ jobs:
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Build unencrypted PKCS12 using Python cryptography
-          python3 -m pip install --quiet cryptography || true
-          python3 -c "
-          from cryptography import x509
-          from cryptography.hazmat.primitives import serialization
-          from cryptography.hazmat.primitives.serialization import pkcs12
-          from cryptography.hazmat.backends import default_backend
-
-          with open('keys/distribution.cer', 'rb') as f:
-              cert = x509.load_der_x509_certificate(f.read(), default_backend())
-          with open('keys/ios_distribution.key', 'rb') as f:
-              key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
-
-          p12 = pkcs12.serialize_key_and_certificates(
-              name=b'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)',
-              key=key,
-              cert=cert,
-              cas=None,
-              encryption_algorithm=serialization.NoEncryption()
-          )
-          with open('$RUNNER_TEMP/unencrypted.p12', 'wb') as f:
-              f.write(p12)
-          print('Created unencrypted.p12 successfully')
-          "
-
-          # 3. Import unencrypted PKCS12 directly into keychain
-          security import "$RUNNER_TEMP/unencrypted.p12" \
+          # 2. Decode and import p12 certificate
+          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          CERT_PASS="${CERTIFICATE_PASSWORD:-}"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$CERT_PASS" \
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+          security import "$RUNNER_TEMP/certificate.p12" \
             -P "" \
             -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
 
-          # 4. Set partition list and default keychain
+          # 3. Set partition list and default keychain
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
@@ -125,24 +111,21 @@ jobs:
           APP_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
           EXT_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_EXT_PROVISIONING_PROFILE_BASE64 }}
         run: |
+          if [ -z "$APP_PROVISIONING_PROFILE_BASE64" ] || [ -z "$EXT_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "::error ::Секреты IOS_APP_PROVISIONING_PROFILE_BASE64 или IOS_EXT_PROVISIONING_PROFILE_BASE64 не установлены в Settings -> Secrets. Скопируйте их из файла GITHUB_SECRETS_READY.md"
+            exit 1
+          fi
+
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
           # 1. Main App Profile
-          if [ -n "$APP_PROVISIONING_PROFILE_BASE64" ]; then
-            echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
-          elif [ -f "keys/OBhod_app.mobileprovision" ]; then
-            cp keys/OBhod_app.mobileprovision "$PP_DIR/obhod_app.mobileprovision"
-          fi
-          cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/OBhod_app.mobileprovision" 2>/dev/null || true
+          echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
+          cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/OBhod_app.mobileprovision"
 
           # 2. Extension Profile
-          if [ -n "$EXT_PROVISIONING_PROFILE_BASE64" ]; then
-            echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
-          elif [ -f "keys/OBhod_ext.mobileprovision" ]; then
-            cp keys/OBhod_ext.mobileprovision "$PP_DIR/obhod_ext.mobileprovision"
-          fi
-          cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision" 2>/dev/null || true
+          echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
+          cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision"
 
           # 3. Copy by UUID (required by modern Xcode)
           APP_UUID=$(security cms -D -i "$PP_DIR/obhod_app.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
@@ -234,14 +217,10 @@ jobs:
 
           if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
             echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
-          elif [ -f "keys/AuthKey_${KEY_ID}.p8" ]; then
-            cp "keys/AuthKey_${KEY_ID}.p8" "$KEY_PATH"
-          elif [ -f "keys/AuthKey_795KRDT33X.p8" ]; then
-            cp "keys/AuthKey_795KRDT33X.p8" "$KEY_PATH"
           fi
 
-          if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ]; then
-            echo "::warning ::APP_STORE_CONNECT_API_ISSUER_ID is not set in secrets. Skipping TestFlight upload. IPA artifact is saved."
+          if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ] || [ ! -f "$KEY_PATH" ]; then
+            echo "::warning ::APP_STORE_CONNECT_API_ISSUER_ID или ключ API не установлены в Secrets. Пропускаем загрузку в TestFlight. Артефакт IPA успешно сохранен в сборке."
             exit 0
           fi
 
