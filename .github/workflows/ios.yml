@@ -280,12 +280,16 @@ jobs:
           KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
 
           if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
-            python3 -c "
-import base64, os, re
-raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
-if len(raw_str) % 4 != 0: raw_str += '=' * (4 - len(raw_str) % 4)
-open('$KEY_PATH', 'wb').write(base64.b64decode(raw_str))
-"
+            python3 - << 'EOF'
+            import base64, os, re
+            raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_STORE_CONNECT_API_KEY_BASE64', ''))
+            if len(raw_str) % 4 != 0:
+                raw_str += '=' * (4 - len(raw_str) % 4)
+            key_id = os.environ.get('APP_STORE_CONNECT_API_KEY_ID', '795KRDT33X')
+            key_path = os.path.expanduser(f'~/.appstoreconnect/private_keys/AuthKey_{key_id}.p8')
+            with open(key_path, 'wb') as f:
+                f.write(base64.b64decode(raw_str))
+            EOF
           fi
 
           if [ -z "$APP_STORE_CONNECT_API_ISSUER_ID" ] || [ ! -f "$KEY_PATH" ]; then
