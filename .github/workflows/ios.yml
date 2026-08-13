@@ -225,6 +225,27 @@ jobs:
             exit 1
           fi
 
+          echo "=== RE-SIGNING ARCHIVE WITH EXPLICIT ENTITLEMENTS ==="
+          APP_DIR="$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app"
+          EXT_DIR="$APP_DIR/PlugIns/TunnelExtension.appex"
+
+          # 1. Sign Extension with TunnelExtension.entitlements
+          codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+            --entitlements "TunnelExtension/TunnelExtension.entitlements" \
+            --keychain "$RUNNER_TEMP/signing.keychain-db" \
+            "$EXT_DIR"
+
+          # 2. Sign Main App with OBhoD.entitlements
+          codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+            --entitlements "OBhoD/App/OBhoD.entitlements" \
+            --keychain "$RUNNER_TEMP/signing.keychain-db" \
+            "$APP_DIR"
+
+          echo "=== ARCHIVED APP ENTITLEMENTS VERIFICATION ==="
+          codesign -d --entitlements :- "$APP_DIR" || true
+          echo "=== ARCHIVED EXTENSION ENTITLEMENTS VERIFICATION ==="
+          codesign -d --entitlements :- "$EXT_DIR" || true
+
       - name: Export IPA
         run: |
           set -o pipefail
@@ -239,12 +260,6 @@ jobs:
             grep -A5 -B5 'error:' /tmp/export.log | tail -30
             exit 1
           fi
-
-          echo "=== ARCHIVED APP ENTITLEMENTS ==="
-          codesign -d --entitlements :- "$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app" || true
-
-          echo "=== ARCHIVED EXTENSION ENTITLEMENTS ==="
-          codesign -d --entitlements :- "$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app/PlugIns/TunnelExtension.appex" || true
 
       - name: Rename IPA
         run: |
