@@ -6,54 +6,113 @@ struct ProfilesView: View {
 
     @State private var showSubscriptionsSheet = false
     @State private var editingProfile: ConnectionProfile? = nil
-    @State private var showAddProfile = false
+    @State private var showToast = false
+    @State private var toastMessage = ""
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
-                // ── Status Banner ──────────────────────────────────────────
-                StatusBanner()
+            ScrollView {
+                VStack(spacing: 16) {
+                    // ── 1. 3D Neon Quick Connect Card ──────────────────────────
+                    NeonConnectHeroCard(
+                        currentProfile: profilesStore.currentProfile,
+                        isRunning: tunnelManager.isRunning,
+                        isConnecting: tunnelManager.isConnecting,
+                        onToggle: toggleConnection
+                    )
                     .padding(.horizontal)
-                    .padding(.top, 12)
+                    .padding(.top, 8)
 
-                // ── Profile List ───────────────────────────────────────────
-                if profilesStore.profiles.isEmpty {
-                    Spacer()
-                    EmptyProfilesView(showSheet: $showSubscriptionsSheet)
-                    Spacer()
-                } else {
-                    List {
-                        ForEach(profilesStore.profiles) { profile in
-                            ProfileRow(
-                                profile: profile,
-                                isActive: profile.id == profilesStore.currentProfileId,
-                                isRunning: tunnelManager.isRunning && profile.id == profilesStore.currentProfileId,
-                                onTap: { selectAndConnect(profile) },
-                                onEdit: { editingProfile = profile }
-                            )
+                    // ── 2. Live Stats Grid ─────────────────────────────────────
+                    LiveStatsGrid(
+                        isRunning: tunnelManager.isRunning,
+                        uptime: tunnelManager.uptimeString,
+                        trafficMb: profilesStore.currentProfile?.trafficMb ?? 0,
+                        workers: profilesStore.currentProfile?.workersPerHash ?? 16,
+                        profileName: profilesStore.currentProfile?.name ?? "OBhoD"
+                    )
+                    .padding(.horizontal)
+
+                    // ── 3. Header & Action Row ─────────────────────────────────
+                    HStack {
+                        Text("Серверы и профили")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.primary)
+
+                        Spacer()
+
+                        Button {
+                            showSubscriptionsSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "plus.circle.fill")
+                                Text("Добавить")
+                            }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.orange)
                         }
-                        .onDelete { profilesStore.remove(at: $0) }
-                        .onMove { profilesStore.move(from: $0, to: $1) }
                     }
-                    .listStyle(.insetGrouped)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
+                    // ── 4. Profile List ────────────────────────────────────────
+                    if profilesStore.profiles.isEmpty {
+                        EmptyProfilesCard(showSheet: $showSubscriptionsSheet)
+                            .padding(.horizontal)
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(profilesStore.profiles) { profile in
+                                ProfileCardView(
+                                    profile: profile,
+                                    isActive: profile.id == profilesStore.currentProfileId,
+                                    isRunning: tunnelManager.isRunning && profile.id == profilesStore.currentProfileId,
+                                    onSelect: { selectProfile(profile) },
+                                    onEdit: { editingProfile = profile },
+                                    onDelete: { profilesStore.remove(id: profile.id) }
+                                )
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
+                }
+                .padding(.bottom, 24)
+            }
+            .refreshable {
+                let res = await profilesStore.refreshSubscriptions()
+                if res.refreshed > 0 {
+                    toastMessage = "Обновлено \(res.refreshed) профилей"
+                    showToast = true
+                } else if res.failed > 0 {
+                    toastMessage = "Не удалось обновить подписку"
+                    showToast = true
                 }
             }
-            .navigationTitle(profilesStore.displayProfileName)
+            .navigationTitle("OBhoD")
             .toolbar {
-                ToolbarItemGroup(placement: .navigationBarLeading) {
-                    if tunnelManager.isRunning || tunnelManager.isConnecting {
-                        Button(role: .destructive) {
-                            tunnelManager.disconnect()
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if profilesStore.isRefreshing {
+                        ProgressView()
+                            .tint(.orange)
+                    } else {
+                        Button {
+                            Task {
+                                let res = await profilesStore.refreshSubscriptions()
+                                if res.refreshed > 0 {
+                                    toastMessage = "Обновлено \(res.refreshed) профилей"
+                                    showToast = true
+                                }
+                            }
                         } label: {
-                            Label("Отключить", systemImage: "stop.circle.fill")
-                                .foregroundColor(.red)
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundColor(.primary)
                         }
                     }
-                }
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    EditButton()
-                    Button { showSubscriptionsSheet = true } label: {
-                        Image(systemName: "plus.circle.fill")
+
+                    Button {
+                        showSubscriptionsSheet = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .foregroundColor(.orange)
                     }
                 }
             }
@@ -63,11 +122,22 @@ struct ProfilesView: View {
             .sheet(item: $editingProfile) { profile in
                 ProfileEditView(profile: profile)
             }
+            .overlay(alignment: .bottom) {
+                if showToast {
+                    ToastBanner(message: toastMessage)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .onAppear {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                withAnimation { showToast = false }
+                            }
+                        }
+                        .padding(.bottom, 16)
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .importSubscriptionURL)) { note in
             if let url = note.object as? URL {
                 showSubscriptionsSheet = true
-                // Pass URL to sheet via notification (SubscriptionsSheet handles it)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     NotificationCenter.default.post(name: .beginImportFromURL, object: url)
                 }
@@ -75,219 +145,349 @@ struct ProfilesView: View {
         }
     }
 
-    private func selectAndConnect(_ profile: ConnectionProfile) {
+    private func toggleConnection() {
+        if tunnelManager.isRunning {
+            tunnelManager.disconnect()
+        } else if let profile = profilesStore.currentProfile {
+            tunnelManager.connect(profile: profile)
+        } else if let first = profilesStore.profiles.first {
+            profilesStore.setActive(id: first.id)
+            tunnelManager.connect(profile: first)
+        } else {
+            showSubscriptionsSheet = true
+        }
+    }
+
+    private func selectProfile(_ profile: ConnectionProfile) {
         if tunnelManager.isRunning && profilesStore.currentProfileId == profile.id {
             tunnelManager.disconnect()
             return
         }
-        if tunnelManager.isRunning { tunnelManager.disconnect() }
+        if tunnelManager.isRunning {
+            tunnelManager.disconnect()
+        }
         profilesStore.setActive(id: profile.id)
         tunnelManager.connect(profile: profile)
     }
 }
 
-// MARK: – Status Banner
+// MARK: – 1. 3D Neon Connect Hero Card
 
-private struct StatusBanner: View {
-    @EnvironmentObject var tunnelManager: TunnelManager
+private struct NeonConnectHeroCard: View {
+    let currentProfile: ConnectionProfile?
+    let isRunning: Bool
+    let isConnecting: Bool
+    let onToggle: () -> Void
+
+    @State private var isPulsing = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 10, height: 10)
-                .shadow(color: statusColor.opacity(0.6), radius: 4)
+        VStack(spacing: 16) {
+            // Neon Button
+            Button(action: onToggle) {
+                ZStack {
+                    // Outer glow ring
+                    Circle()
+                        .stroke(ringColor.opacity(0.3), lineWidth: 10)
+                        .frame(width: 140, height: 140)
+                        .scaleEffect(isConnecting ? (isPulsing ? 1.15 : 0.95) : 1.0)
+                        .animation(isConnecting ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: isPulsing)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(statusTitle)
-                    .font(.system(size: 14, weight: .semibold))
-                if tunnelManager.isRunning {
-                    Text(tunnelManager.stats)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+                    // Inner glowing circle
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: isRunning
+                                    ? [Color.green.opacity(0.85), Color.mint]
+                                    : (isConnecting
+                                        ? [Color.orange.opacity(0.85), Color.yellow]
+                                        : [Color.orange, Color.red.opacity(0.85)]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 110, height: 110)
+                        .shadow(color: ringColor.opacity(0.6), radius: isRunning ? 16 : 8, x: 0, y: 0)
+
+                    // Icon & text
+                    VStack(spacing: 4) {
+                        Image(systemName: isRunning ? "shield.checkmark.fill" : (isConnecting ? "arrow.triangle.2.circlepath" : "power"))
+                            .font(.system(size: 34, weight: .bold))
+                            .foregroundColor(.white)
+                            .rotationEffect(isConnecting ? .degrees(isPulsing ? 360 : 0) : .degrees(0))
+                            .animation(isConnecting ? .linear(duration: 1.5).repeatForever(autoreverses: false) : .default, value: isPulsing)
+
+                        Text(statusLabel)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white.opacity(0.95))
+                    }
                 }
             }
+            .buttonStyle(.plain)
+            .onAppear { isPulsing = true }
 
-            Spacer()
+            // Active Profile Info
+            VStack(spacing: 3) {
+                Text(currentProfile?.name ?? "Нет выбранного сервера")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.primary)
 
-            if tunnelManager.isRunning, let since = tunnelManager.connectedSince {
-                TimelineView(.periodic(from: since, by: 1)) { _ in
-                    Text(tunnelManager.uptimeString)
+                if let peer = currentProfile?.peer, !peer.isEmpty {
+                    Text(peer)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
+
+                if let expBadge = currentProfile?.expirationBadge {
+                    Text(expBadge)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(currentProfile?.isExpired == true ? .red : .secondary)
+                        .padding(.top, 2)
+                }
             }
         }
-        .padding(12)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(statusColor.opacity(0.12))
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color(UIColor.secondarySystemGroupedBackground))
+                .shadow(color: Color.black.opacity(0.06), radius: 10, x: 0, y: 4)
         )
-        .animation(.easeInOut(duration: 0.3), value: tunnelManager.isRunning)
     }
 
-    private var statusColor: Color {
-        if tunnelManager.isRunning   { return .green }
-        if tunnelManager.isConnecting { return .orange }
-        return .gray
+    private var ringColor: Color {
+        if isRunning { return .green }
+        if isConnecting { return .orange }
+        return .orange.opacity(0.6)
     }
 
-    private var statusTitle: String {
-        if tunnelManager.isConnecting { return "Подключение…" }
-        if tunnelManager.isRunning    { return "🛡️ Подключено" }
-        return "Отключено"
+    private var statusLabel: String {
+        if isConnecting { return "ПОДКЛЮЧЕНИЕ" }
+        if isRunning { return "АКТИВЕН" }
+        return "ВКЛЮЧИТЬ"
     }
 }
 
-// MARK: – Profile Row
+// MARK: – 2. Live Stats 2x2 Grid
 
-private struct ProfileRow: View {
+private struct LiveStatsGrid: View {
+    let isRunning: Bool
+    let uptime: String
+    let trafficMb: Double
+    let workers: Int
+    let profileName: String
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            StatCard(
+                icon: "timer",
+                title: "Время сессии",
+                value: isRunning ? uptime : "00:00",
+                color: .blue
+            )
+            StatCard(
+                icon: "arrow.up.arrow.down",
+                title: "Трафик",
+                value: String(format: "%.1f МБ", trafficMb),
+                color: .teal
+            )
+            StatCard(
+                icon: "cpu",
+                title: "Потоков",
+                value: "\(workers)",
+                color: .purple
+            )
+            StatCard(
+                icon: "network",
+                title: "Статус",
+                value: isRunning ? "Защищен" : "Выключен",
+                color: isRunning ? .green : .gray
+            )
+        }
+    }
+}
+
+private struct StatCard: View {
+    let icon: String
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundColor(color)
+                .frame(width: 32, height: 32)
+                .background(color.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text(value)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(UIColor.secondarySystemGroupedBackground))
+        )
+    }
+}
+
+// MARK: – 3. Profile Card View
+
+private struct ProfileCardView: View {
     let profile: ConnectionProfile
     let isActive: Bool
     let isRunning: Bool
-    let onTap: () -> Void
+    let onSelect: () -> Void
     let onEdit: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            // Connect button
-            Button(action: onTap) {
+            // Quick action button
+            Button(action: onSelect) {
                 ZStack {
                     Circle()
-                        .fill(isRunning ? Color.green : Color.orange)
+                        .fill(isRunning ? Color.green : (isActive ? Color.orange : Color(UIColor.tertiarySystemFill)))
                         .frame(width: 44, height: 44)
+
                     Image(systemName: isRunning ? "stop.fill" : "play.fill")
-                        .foregroundColor(.white)
-                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(isRunning || isActive ? .white : .secondary)
+                        .font(.system(size: 15, weight: .bold))
                 }
             }
             .buttonStyle(.plain)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(profile.name)
-                    .font(.system(size: 15, weight: .semibold))
+            // Info
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(profile.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    if isActive {
+                        Text("ТЕКУЩИЙ")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.15))
+                            .foregroundColor(.orange)
+                            .clipShape(Capsule())
+                    }
+                }
+
                 Text(profile.peer)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    Label("\(profile.workersPerHash) потоков", systemImage: "cpu")
+
+                HStack(spacing: 8) {
+                    Text(profile.expirationBadge)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(profile.isExpired ? .red : .secondary)
+
                     if profile.trafficMb > 0 {
-                        Label(String(format: "%.1f МБ", profile.trafficMb), systemImage: "arrow.up.arrow.down")
+                        Text("•")
+                            .foregroundColor(.secondary)
+                        Text(String(format: "%.1f МБ", profile.trafficMb))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                 }
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
             }
 
             Spacer()
 
-            Button(action: onEdit) {
-                Image(systemName: "pencil.circle")
+            // Menu actions
+            Menu {
+                Button(action: onEdit) {
+                    Label("Редактировать", systemImage: "pencil")
+                }
+                Button(role: .destructive, action: onDelete) {
+                    Label("Удалить", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.secondary)
+                    .frame(width: 32, height: 32)
             }
-            .buttonStyle(.plain)
         }
-        .padding(.vertical, 6)
-        .listRowBackground(isActive ? Color.orange.opacity(0.08) : Color.clear)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(UIColor.secondarySystemGroupedBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(isActive ? Color.orange.opacity(0.4) : Color.clear, lineWidth: 1.5)
+                )
+        )
     }
 }
 
-// MARK: – Empty state
+// MARK: – Empty State
 
-private struct EmptyProfilesView: View {
+private struct EmptyProfilesCard: View {
     @Binding var showSheet: Bool
-    @EnvironmentObject var profilesStore: ProfilesStore
-    @EnvironmentObject var tunnelManager: TunnelManager
-    @State private var isSyncing = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "shield.slash")
-                .font(.system(size: 52))
-                .foregroundColor(.orange.opacity(0.7))
-            Text("Пока нет сохранённых профилей")
-                .font(.title3.bold())
-            Text("Получите профиль автоматически из Telegram-бота или добавьте подписку вручную.")
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-                .font(.subheadline)
-                .padding(.horizontal, 24)
+        VStack(spacing: 12) {
+            Image(systemName: "server.rack")
+                .font(.system(size: 40))
+                .foregroundColor(.orange)
 
-            VStack(spacing: 12) {
-                Button {
-                    handleQuickGetProfile()
-                } label: {
-                    HStack {
-                        if isSyncing {
-                            ProgressView().tint(.white)
-                        } else {
-                            Label("⚡ Получить мой профиль", systemImage: "bolt.fill")
-                                .font(.system(size: 15, weight: .bold))
-                        }
-                    }
-                    .padding(.horizontal, 24).padding(.vertical, 14)
-                    .frame(maxWidth: .infinity)
+            Text("Список серверов пуст")
+                .font(.system(size: 16, weight: .semibold))
+
+            Text("Добавьте профиль или подписку из Telegram-бота")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                showSheet = true
+            } label: {
+                Label("Добавить подписку", systemImage: "plus.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                     .background(Color.orange)
                     .foregroundColor(.white)
-                    .cornerRadius(14)
-                }
-                .disabled(isSyncing)
-
-                Button {
-                    showSheet = true
-                } label: {
-                    Label("Добавить по ссылке", systemImage: "link")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
+                    .clipShape(Capsule())
             }
-            .padding(.horizontal, 32)
+            .padding(.top, 4)
         }
-    }
-
-    private func handleQuickGetProfile() {
-        let subUrlString = profilesStore.lastSubscriptionURL
-        if !subUrlString.isEmpty, let url = URL(string: subUrlString) {
-            isSyncing = true
-            Task {
-                do {
-                    let result = try await SubscriptionImport.fetch(url: url)
-                    await MainActor.run {
-                        let groupName = result.subscriptionName ?? "OBhoD_BLOK"
-                        for var p in result.profiles {
-                            if p.name.isEmpty || p.name == "Imported" || p.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression) != nil {
-                                p.name = groupName
-                            }
-                            profilesStore.add(p)
-                        }
-                        if let first = result.profiles.first {
-                            profilesStore.setActive(id: first.id)
-                        }
-                        isSyncing = false
-                    }
-                } catch {
-                    await MainActor.run {
-                        isSyncing = false
-                        openTelegramBot()
-                    }
-                }
-            }
-        } else {
-            openTelegramBot()
-        }
-    }
-
-    private func openTelegramBot() {
-        if let botURL = URL(string: "https://t.me/OBHOD_INT_BOT?start=profile") {
-            UIApplication.shared.open(botURL)
-        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(UIColor.secondarySystemGroupedBackground))
+        )
     }
 }
 
-// MARK: – Notification
+// MARK: – Toast Banner
 
-extension Notification.Name {
-    static let beginImportFromURL = Notification.Name("beginImportFromURL")
+private struct ToastBanner: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.85))
+            .clipShape(Capsule())
+            .shadow(radius: 6)
+    }
 }

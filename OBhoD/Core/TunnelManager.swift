@@ -60,7 +60,7 @@ final class TunnelManager: ObservableObject {
         isConnecting = true
         stats = "Подключение…"
         logs.removeAll()
-        unreadErrors = 0
+        syncSettingsToAppGroup(profile: profile)
 
         let deviceID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-ios"
 
@@ -103,6 +103,11 @@ final class TunnelManager: ObservableObject {
     }
 
     func clearUnreadErrors() {
+        unreadErrors = 0
+    }
+
+    func clearLogs() {
+        logs.removeAll()
         unreadErrors = 0
     }
 
@@ -168,5 +173,14 @@ final class TunnelManager: ObservableObject {
         let s = elapsed % 60
         if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
         return String(format: "%d:%02d", m, s)
+    }
+
+    private func syncSettingsToAppGroup(profile: ConnectionProfile) {
+        if let encoded = try? JSONEncoder().encode(profile) {
+            defaults.set(encoded, forKey: AppGroup.Keys.activeProfileJSON)
+        }
+        defaults.set(SettingsStore.shared.goDnsMode, forKey: "goDnsMode")
+        defaults.set(SettingsStore.shared.obfsMode, forKey: "obfsMode")
+        defaults.set(SettingsStore.shared.vkAnonPath, forKey: "vkAnonPath")
     }
 }

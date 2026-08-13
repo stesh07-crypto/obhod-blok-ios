@@ -53,6 +53,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.defaults?.set(stats, forKey: AppGroup.Keys.lastStats)
             }
 
+            // Fetch dynamic user settings from AppGroup defaults
+            let dns = self.defaults?.string(forKey: "goDnsMode") ?? "cloudflare"
+            let obfsMode = self.defaults?.string(forKey: "obfsMode") ?? "tls"
+            let vkAnonPath = self.defaults?.string(forKey: "vkAnonPath") ?? "/voice/join"
+
             // Start Go tunnel
             let deviceID = self.protocolConfiguration.serverAddress ?? "unknown-ext"
             let result = GoClient.start(
@@ -62,9 +67,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 port: profile.listenPort,
                 workers: profile.workersPerHash,
                 deviceID: deviceID,
-                dns: "cloudflare",
-                obfsMode: "tls",
-                vkAnonPath: "/voice/join"
+                dns: dns,
+                obfsMode: obfsMode,
+                vkAnonPath: vkAnonPath
             )
 
             if result != 0 {

@@ -67,7 +67,7 @@ struct LogsView: View {
                         Image(systemName: "doc.on.clipboard")
                     }
                     Button(role: .destructive) {
-                        // tunnelManager.clearLogs() — optional
+                        tunnelManager.clearLogs()
                     } label: {
                         Image(systemName: "trash")
                     }

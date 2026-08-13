@@ -10,18 +10,44 @@ struct SubscriptionsSheet: View {
     @State private var pendingProfiles: [ConnectionProfile] = []
     @State private var showConfirm = false
     @State private var parsedName: String? = nil
+    @State private var parsedExpires: Int64 = 0
 
     var body: some View {
         NavigationView {
             Form {
                 Section(
                     header: Text("Ссылка подписки"),
-                    footer: Text("Ссылка начинается с https:// или qwdtt://\nОтсканируйте QR из бота или вставьте вручную")
+                    footer: Text("Вставьте ссылку https://, qwdtt:// или скопируйте ключ из бота.")
                 ) {
-                    TextField("https://... или qwdtt://import?url=...", text: $urlText)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    HStack {
+                        TextField("https://... или qwdtt://...", text: $urlText)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+
+                        if !urlText.isEmpty {
+                            Button {
+                                urlText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    Button {
+                        if let clip = UIPasteboard.general.string {
+                            urlText = clip.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "doc.on.clipboard")
+                            Text("Вставить из буфера")
+                        }
+                        .font(.system(size: 14))
+                        .foregroundColor(.orange)
+                    }
 
                     if let error = errorMessage {
                         Label(error, systemImage: "exclamationmark.circle")
@@ -49,6 +75,24 @@ struct SubscriptionsSheet: View {
                     .foregroundColor(.white)
                     .font(.body.bold())
                 }
+
+                Section(header: Text("Где взять подписку?")) {
+                    Button {
+                        if let botURL = URL(string: "https://t.me/OBHOD_INT_BOT?start=profile") {
+                            UIApplication.shared.open(botURL)
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "paperplane.fill")
+                                .foregroundColor(.blue)
+                            Text("Получить ключ в @OBHOD_INT_BOT")
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Image(systemName: "arrow.up.forward.app")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
             .navigationTitle("Добавить подписку")
             .navigationBarTitleDisplayMode(.inline)
@@ -57,10 +101,10 @@ struct SubscriptionsSheet: View {
                     Button("Закрыть") { dismiss() }
                 }
             }
-            .alert("Добавить профили?", isPresented: $showConfirm) {
-                Button("Добавить \(pendingProfiles.count) профилей", role: .none) {
+            .alert("Импорт подписки", isPresented: $showConfirm) {
+                Button("Добавить (\(pendingProfiles.count))", role: .none) {
                     var addedIds: [String] = []
-                    let groupName = parsedName ?? "OBhoD_BLOK"
+                    let groupName = parsedName ?? "OBhoD"
                     for var p in pendingProfiles {
                         if p.name.isEmpty || p.name == "Imported" || p.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression) != nil {
                             p.name = groupName
@@ -75,7 +119,8 @@ struct SubscriptionsSheet: View {
                 }
                 Button("Отмена", role: .cancel) {}
             } message: {
-                Text(parsedName.map { "Подписка: \($0)" } ?? "")
+                let badge = SubscriptionImport.formatRemainingDaysBadge(expiresAt: parsedExpires)
+                Text("\(parsedName ?? "OBhoD")\nНайдено профилей: \(pendingProfiles.count)\nСтатус: \(badge)")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .beginImportFromURL)) { note in
@@ -109,15 +154,16 @@ struct SubscriptionsSheet: View {
             if let result = SubscriptionImport.parse(rawText: fetchURL) {
                 pendingProfiles = result.profiles
                 parsedName = result.subscriptionName
+                parsedExpires = result.expiresAt
                 showConfirm = true
             } else {
-                errorMessage = "Не удалось разобрать qwdtt:// URI"
+                errorMessage = "Не удалось разобрать конфигурацию qwdtt://"
             }
             return
         }
 
         guard let url = URL(string: fetchURL) else {
-            errorMessage = "Неверный URL"
+            errorMessage = "Неверный формат адреса URL"
             return
         }
 
@@ -125,6 +171,7 @@ struct SubscriptionsSheet: View {
             let result = try await SubscriptionImport.fetch(url: url)
             pendingProfiles = result.profiles
             parsedName = result.subscriptionName
+            parsedExpires = result.expiresAt
             profilesStore.saveSubscriptionURL(url.absoluteString)
             showConfirm = true
         } catch {
@@ -133,7 +180,7 @@ struct SubscriptionsSheet: View {
     }
 }
 
-// MARK: – Profile Edit View (simple)
+// MARK: – Profile Edit View
 
 struct ProfileEditView: View {
     @EnvironmentObject var profilesStore: ProfilesStore
@@ -149,12 +196,30 @@ struct ProfileEditView: View {
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                 }
-                Section("Параметры") {
+
+                Section("Параметры соединения") {
                     TextField("Хэши VK (через запятую)", text: $profile.vkHashes)
                         .font(.system(size: 13, design: .monospaced))
                     TextField("Пароль", text: $profile.password)
-                    Stepper("Потоков: \(profile.workersPerHash)", value: $profile.workersPerHash, in: 1...64)
+                    Stepper("Потоков на хэш: \(profile.workersPerHash)", value: $profile.workersPerHash, in: 1...64)
                     Stepper("Порт: \(profile.listenPort)", value: $profile.listenPort, in: 1000...65535, step: 1)
+                }
+
+                Section("Статистика") {
+                    HStack {
+                        Text("Срок действия")
+                        Spacer()
+                        Text(profile.expirationBadge)
+                            .foregroundColor(profile.isExpired ? .red : .secondary)
+                    }
+                    if profile.trafficMb > 0 {
+                        HStack {
+                            Text("Трафик")
+                            Spacer()
+                            Text(String(format: "%.1f МБ", profile.trafficMb))
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
             .navigationTitle("Редактировать")

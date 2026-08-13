@@ -70,6 +70,7 @@ targets:
       - path: OBhoD/Core/AppGroup.swift
       - path: OBhoD/Core/GoClient.swift
       - path: OBhoD/Core/ProfilesStore.swift
+      - path: OBhoD/Core/SubscriptionImport.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios.tunnel

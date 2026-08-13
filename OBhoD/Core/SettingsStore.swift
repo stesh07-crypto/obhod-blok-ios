@@ -24,26 +24,27 @@ final class SettingsStore: ObservableObject {
     }
 
     private init() {
-        goDnsMode    = defaults.string(forKey: "go_dns_mode") ?? "cloudflare"
-        obfsMode     = defaults.string(forKey: "obfs_mode") ?? "tls"
-        vkAnonPath   = defaults.string(forKey: "vk_anon_path") ?? "/voice/join"
-        detailedLogs = defaults.bool(forKey: "detailed_logs")
-        autoReconnect = defaults.bool(forKey: "auto_reconnect")
+        goDnsMode     = defaults.string(forKey: "go_dns_mode") ?? "cloudflare"
+        obfsMode      = defaults.string(forKey: "obfs_mode") ?? "tls"
+        vkAnonPath    = defaults.string(forKey: "vk_anon_path") ?? "/voice/join"
+        detailedLogs  = defaults.bool(forKey: "detailed_logs")
+        autoReconnect = defaults.object(forKey: "auto_reconnect") == nil ? true : defaults.bool(forKey: "auto_reconnect")
     }
 
     // DNS presets
-    static let dnsPresets: [(title: String, value: String)] = [
-        ("Cloudflare (1.1.1.1)", "cloudflare"),
-        ("Google (8.8.8.8)", "google"),
-        ("Яндекс", "yandex"),
-        ("DoH Cloudflare", "doh:https://cloudflare-dns.com/dns-query"),
-        ("DoH Google", "doh:https://dns.google/dns-query"),
+    static let dnsPresets: [(title: String, subtitle: String, value: String)] = [
+        ("Cloudflare", "1.1.1.1 — Быстрый и приватный", "cloudflare"),
+        ("Google DNS", "8.8.8.8 — Стабильный глобальный", "google"),
+        ("AdGuard DoH", "Блокировка рекламы и трекеров", "doh:https://dns.adguard-dns.com/dns-query"),
+        ("Cloudflare DoH", "Шифрованный DNS через HTTPS", "doh:https://cloudflare-dns.com/dns-query"),
+        ("Google DoH", "Шифрованный Google DNS через HTTPS", "doh:https://dns.google/dns-query"),
+        ("Яндекс DNS", "Быстрый DNS для РФ", "yandex"),
     ]
 
     // Obfuscation presets
-    static let obfsPresets: [(title: String, value: String)] = [
-        ("TLS (рекомендуется)", "tls"),
-        ("HTTP", "http"),
-        ("Без маскировки", "none"),
+    static let obfsPresets: [(title: String, subtitle: String, value: String)] = [
+        ("TLS Маскировка (Рекомендуется)", "Имитирует защищенный HTTPS трафик", "tls"),
+        ("HTTP Маскировка", "Обычный веб-трафик", "http"),
+        ("Без маскировки", "Прямой TURN протокол", "none"),
     ]
 }

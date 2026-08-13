@@ -22,7 +22,7 @@ env:
 jobs:
   build-and-upload:
     name: Build iOS App & Upload to TestFlight
-    runs-on: macos-13
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
@@ -33,14 +33,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.23'
           cache-dependency-path: go_client/go.sum
 
       - name: Select Xcode
         run: |
           echo "=== Available Xcode versions ==="
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
-          XCODE_PATH=$(ls -d /Applications/Xcode_16.[0-9]*.app 2>/dev/null | sort -V | tail -1)
+          XCODE_PATH=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v '/Applications/Xcode.app' | sort -V | tail -1)
           if [ -z "$XCODE_PATH" ] || [ ! -d "${XCODE_PATH}/Contents/Developer" ]; then
             XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
           fi
@@ -69,15 +68,22 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          KEY_PASS="${KEYCHAIN_PASSWORD:-buildpassword123}"
+          security create-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          if [ -n "$CERTIFICATE_BASE64" ]; then
+            echo "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          elif [ -f "keys/certificate.p12" ]; then
+            cp keys/certificate.p12 "$RUNNER_TEMP/certificate.p12"
+          fi
+
+          CERT_PASS="${CERTIFICATE_PASSWORD:-}"
           security import "$RUNNER_TEMP/certificate.p12" \
-            -P "$CERTIFICATE_PASSWORD" \
+            -P "$CERT_PASS" \
             -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profiles
@@ -88,8 +94,19 @@ jobs:
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
-          echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
-          echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
+          if [ -n "$APP_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "$APP_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_app.mobileprovision"
+          elif [ -f "keys/OBhod_app.mobileprovision" ]; then
+            cp keys/OBhod_app.mobileprovision "$PP_DIR/obhod_app.mobileprovision"
+          fi
+          cp "$PP_DIR/obhod_app.mobileprovision" "$PP_DIR/OBhod_app.mobileprovision"
+
+          if [ -n "$EXT_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "$EXT_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_DIR/obhod_ext.mobileprovision"
+          elif [ -f "keys/OBhod_ext.mobileprovision" ]; then
+            cp keys/OBhod_ext.mobileprovision "$PP_DIR/obhod_ext.mobileprovision"
+          fi
+          cp "$PP_DIR/obhod_ext.mobileprovision" "$PP_DIR/OBhod_ext.mobileprovision"
 
           APP_UUID=$(security cms -D -i "$PP_DIR/obhod_app.mobileprovision" | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/obhod_ext.mobileprovision" | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)

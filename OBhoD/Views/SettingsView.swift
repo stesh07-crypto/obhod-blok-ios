@@ -8,10 +8,13 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 // ── Network ───────────────────────────────────────────────
-                Section(header: Text("🌐 Сеть")) {
-                    Picker("DNS", selection: $settings.goDnsMode) {
+                Section(header: Text("🌐 Сеть и DNS")) {
+                    Picker("DNS Режим", selection: $settings.goDnsMode) {
                         ForEach(SettingsStore.dnsPresets, id: \.value) { preset in
-                            Text(preset.title).tag(preset.value)
+                            VStack(alignment: .leading) {
+                                Text(preset.title)
+                            }
+                            .tag(preset.value)
                         }
                     }
 
@@ -24,11 +27,11 @@ struct SettingsView: View {
 
                 // ── VK ────────────────────────────────────────────────────
                 Section(
-                    header: Text("🔑 VK (анонимный режим)"),
-                    footer: Text("Путь для анонимного получения TURN. Обычно оставьте как есть.")
+                    header: Text("🔑 VK TURN (анонимный режим)"),
+                    footer: Text("Путь для анонимного получения TURN без авторизации.")
                 ) {
                     HStack {
-                        Text("Путь VK")
+                        Text("Путь")
                         Spacer()
                         TextField("/voice/join", text: $settings.vkAnonPath)
                             .multilineTextAlignment(.trailing)
@@ -37,16 +40,16 @@ struct SettingsView: View {
                     }
                 }
 
-                // ── Logs ──────────────────────────────────────────────────
-                Section(header: Text("📋 Логи")) {
-                    Toggle("Подробные логи", isOn: $settings.detailedLogs)
+                // ── Tunnel Behavior ───────────────────────────────────────
+                Section(header: Text("⚙️ Поведение туннеля")) {
                     Toggle("Авто-переподключение", isOn: $settings.autoReconnect)
+                    Toggle("Подробные логи", isOn: $settings.detailedLogs)
                 }
 
-                // ── Subscriptions ──────────────────────────────────────────
+                // ── Bot Profile Link ──────────────────────────────────────
                 Section(
-                    header: Text("⚡ Профиль и подписка"),
-                    footer: Text("Получите профиль из Telegram-бота или обновите текущую подписку.")
+                    header: Text("⚡ Профиль и бот"),
+                    footer: Text("Управление подпиской и получение новых серверов через официального Telegram-бота.")
                 ) {
                     Button {
                         if let botURL = URL(string: "https://t.me/OBHOD_INT_BOT?start=profile") {
@@ -54,9 +57,11 @@ struct SettingsView: View {
                         }
                     } label: {
                         HStack {
-                            Label("⚡ Получить мой профиль", systemImage: "bolt.fill")
-                                .foregroundColor(.orange)
+                            Image(systemName: "paperplane.fill")
+                                .foregroundColor(.blue)
+                            Text("Открыть Telegram-бота")
                                 .font(.body.bold())
+                                .foregroundColor(.primary)
                             Spacer()
                             Image(systemName: "arrow.up.forward.app")
                                 .foregroundColor(.secondary)
@@ -67,12 +72,27 @@ struct SettingsView: View {
                 // ── About ─────────────────────────────────────────────────
                 Section(header: Text("ℹ️ О приложении")) {
                     HStack {
-                        Text("OBhoD iOS")
+                        Text("Название")
                         Spacer()
-                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
+                        Text("OBhoD (iOS)")
                             .foregroundColor(.secondary)
                     }
-                    Link("Поддержка в Telegram (@OBHOD_INT_BOT)", destination: URL(string: "https://t.me/OBHOD_INT_BOT")!)
+
+                    HStack {
+                        Text("Версия")
+                        Spacer()
+                        Text("1.3.9")
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Text("Ядро")
+                        Spacer()
+                        Text("v1.4.0 (Go/TURN)")
+                            .foregroundColor(.secondary)
+                    }
+
+                    Link("Поддержка (@OBHOD_INT_BOT)", destination: URL(string: "https://t.me/OBHOD_INT_BOT")!)
                 }
             }
             .navigationTitle("Настройки")
