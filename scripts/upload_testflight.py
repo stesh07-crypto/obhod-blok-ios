@@ -48,7 +48,7 @@ def main():
         print(f'::error ::IPA file not found at {ipa_path}')
         sys.exit(1)
 
-    print('Sealing IPA with explicit NetworkExtension entitlements...')
+    print('Sealing IPA with explicit NetworkExtension entitlements and DER encoding...')
     work_dir = tempfile.mkdtemp()
     with zipfile.ZipFile(ipa_path, 'r') as zip_ref:
         zip_ref.extractall(work_dir)
@@ -59,14 +59,22 @@ def main():
     keychain = os.environ.get('KEYCHAIN_PATH')
 
     if os.path.exists(ext_dir) and os.path.exists('TunnelExtension/TunnelExtension.entitlements'):
-        sign_cmd = ['codesign', '--force', '--sign', identity, '--entitlements', 'TunnelExtension/TunnelExtension.entitlements']
+        sign_cmd = [
+            'codesign', '--force', '--sign', identity,
+            '--entitlements', 'TunnelExtension/TunnelExtension.entitlements',
+            '--generate-entitlement-der'
+        ]
         if keychain: sign_cmd += ['--keychain', keychain]
         sign_cmd.append(ext_dir)
         print('Signing Extension:', ' '.join(sign_cmd))
         subprocess.run(sign_cmd, check=True)
 
     if os.path.exists(app_dir) and os.path.exists('OBhoD/App/OBhoD.entitlements'):
-        sign_cmd = ['codesign', '--force', '--sign', identity, '--entitlements', 'OBhoD/App/OBhoD.entitlements']
+        sign_cmd = [
+            'codesign', '--force', '--sign', identity,
+            '--entitlements', 'OBhoD/App/OBhoD.entitlements',
+            '--generate-entitlement-der'
+        ]
         if keychain: sign_cmd += ['--keychain', keychain]
         sign_cmd.append(app_dir)
         print('Signing App:', ' '.join(sign_cmd))
