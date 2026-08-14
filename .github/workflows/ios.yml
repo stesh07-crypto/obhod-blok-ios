@@ -21,7 +21,7 @@ env:
 jobs:
   build-and-upload:
     name: Build iOS App & Upload to TestFlight
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
