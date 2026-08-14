@@ -135,11 +135,10 @@ func WDTT_Start(
 		iosLog("[СЕТЬ] Проверка DNS...", false)
 		dnsOk, dnsMsg := checkDNS(ctx, dnsStr)
 		if !dnsOk {
-			iosLog(fmt.Sprintf("[СЕТЬ] DNS недоступен: %s", dnsMsg), true)
-			iosLog("[СЕТЬ] Смените DNS в Настройках → Сеть", true)
-			return
+			iosLog(fmt.Sprintf("[СЕТЬ] Предупреждение DNS: %s (используем системный DNS)", dnsMsg), false)
+		} else {
+			iosLog(fmt.Sprintf("[СЕТЬ] DNS доступен: %s", dnsMsg), false)
 		}
-		iosLog(fmt.Sprintf("[СЕТЬ] DNS доступен: %s", dnsMsg), false)
 
 		// Run tunnel
 		runTunnelLoop(ctx, TunnelParams{
@@ -273,14 +272,32 @@ func runTunnelLoop(ctx context.Context, params TunnelParams) {
 	}
 }
 
+func parseDnsTarget(dnsArg string) string {
+	switch strings.ToLower(strings.TrimSpace(dnsArg)) {
+	case "cloudflare", "1.1.1.1":
+		return "1.1.1.1:53"
+	case "google", "8.8.8.8":
+		return "8.8.8.8:53"
+	case "yandex", "77.88.8.8":
+		return "77.88.8.8:53"
+	case "adguard", "94.140.14.14":
+		return "94.140.14.14:53"
+	default:
+		if strings.HasPrefix(strings.ToLower(dnsArg), "doh:") {
+			return "1.1.1.1:53"
+		}
+		if !strings.Contains(dnsArg, ":") {
+			return net.JoinHostPort(dnsArg, "53")
+		}
+		return dnsArg
+	}
+}
+
 func GoDnsProbeCheck(ctx context.Context, dnsArg string) DnsProbeResult {
 	if dnsArg == "" {
 		return DnsProbeResult{Reachable: true, StatusText: "OK"}
 	}
-	host := dnsArg
-	if !strings.Contains(host, ":") {
-		host = net.JoinHostPort(dnsArg, "53")
-	}
+	host := parseDnsTarget(dnsArg)
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := dialer.DialContext(ctx, "udp", host)
 	if err != nil {
