@@ -312,9 +312,10 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 	if len(params.VkHashes) == 0 {
 		return fmt.Errorf("нет VK-хешей")
 	}
-	logFn(fmt.Sprintf("[ГО-ВОРКЕР] Получение credentials для %d хешей...", len(params.VkHashes)), false)
-	
-	credsCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	setVkAnonPath(params.VkAnonPath)
+	setVkAuthMode(params.VkAuthMode)
+
+	credsCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	
 	u, p, turnURLs, err := GetCreds(credsCtx, params.VkHashes[0], 9001)
