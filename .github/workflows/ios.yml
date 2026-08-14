@@ -232,12 +232,14 @@ jobs:
           # 1. Sign Extension with TunnelExtension.entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "TunnelExtension/TunnelExtension.entitlements" \
+            --generate-entitlement-der \
             --keychain "$RUNNER_TEMP/signing.keychain-db" \
             "$EXT_DIR"
 
           # 2. Sign Main App with OBhoD.entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "OBhoD/App/OBhoD.entitlements" \
+            --generate-entitlement-der \
             --keychain "$RUNNER_TEMP/signing.keychain-db" \
             "$APP_DIR"
 
