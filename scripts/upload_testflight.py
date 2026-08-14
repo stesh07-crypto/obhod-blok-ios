@@ -9,7 +9,7 @@ import zipfile
 import shutil
 import plistlib
 
-def extract_entitlements_from_provision(prov_path):
+def extract_and_sanitize_entitlements(prov_path):
     if not os.path.exists(prov_path):
         return None
     with open(prov_path, 'rb') as f:
@@ -20,7 +20,12 @@ def extract_entitlements_from_provision(prov_path):
         return None
     plist_data = content[start:end + len('</plist>')]
     pl = plistlib.loads(plist_data)
-    return pl.get('Entitlements', {})
+    ent = pl.get('Entitlements', {})
+    
+    # iOS only supports packet-tunnel-provider for packet tunnels (not hotspot-provider or relay)
+    if 'com.apple.developer.networking.networkextension' in ent:
+        ent['com.apple.developer.networking.networkextension'] = ['packet-tunnel-provider']
+    return ent
 
 def sign_item(item_path, entitlements_dict, identity, keychain=None):
     ent_file = tempfile.mktemp(suffix='.plist')
@@ -81,7 +86,7 @@ def main():
         print(f'::error ::IPA file not found at {ipa_path}')
         sys.exit(1)
 
-    print('Sealing IPA with exact Provisioning Profile entitlements and DER encoding...')
+    print('Sealing IPA with clean iOS entitlements and DER encoding...')
     work_dir = tempfile.mkdtemp()
     with zipfile.ZipFile(ipa_path, 'r') as zip_ref:
         zip_ref.extractall(work_dir)
@@ -106,7 +111,7 @@ def main():
         ext_prov = os.path.join(ext_dir, 'embedded.mobileprovision')
         if not os.path.exists(ext_prov):
             ext_prov = 'keys/OBhod_ext.mobileprovision'
-        ext_ent = extract_entitlements_from_provision(ext_prov)
+        ext_ent = extract_and_sanitize_entitlements(ext_prov)
         if ext_ent:
             sign_item(ext_dir, ext_ent, identity, keychain)
 
@@ -115,7 +120,7 @@ def main():
         app_prov = os.path.join(app_dir, 'embedded.mobileprovision')
         if not os.path.exists(app_prov):
             app_prov = 'keys/OBhod_app.mobileprovision'
-        app_ent = extract_entitlements_from_provision(app_prov)
+        app_ent = extract_and_sanitize_entitlements(app_prov)
         if app_ent:
             sign_item(app_dir, app_ent, identity, keychain)
 
