@@ -7,6 +7,39 @@ import subprocess
 import tempfile
 import zipfile
 import shutil
+import plistlib
+
+def extract_entitlements_from_provision(prov_path):
+    if not os.path.exists(prov_path):
+        return None
+    with open(prov_path, 'rb') as f:
+        content = f.read()
+    start = content.find(b'<?xml')
+    end = content.find(b'</plist>')
+    if start == -1 or end == -1:
+        return None
+    plist_data = content[start:end + len('</plist>')]
+    pl = plistlib.loads(plist_data)
+    return pl.get('Entitlements', {})
+
+def sign_item(item_path, entitlements_dict, identity, keychain=None):
+    ent_file = tempfile.mktemp(suffix='.plist')
+    with open(ent_file, 'wb') as f:
+        plistlib.dump(entitlements_dict, f)
+    
+    cmd = [
+        'codesign', '--force', '--sign', identity,
+        '--entitlements', ent_file,
+        '--generate-entitlement-der',
+        '--timestamp=none'
+    ]
+    if keychain:
+        cmd += ['--keychain', keychain]
+    cmd.append(item_path)
+    print(f'Signing {os.path.basename(item_path)} with {len(entitlements_dict)} entitlements...')
+    subprocess.run(cmd, check=True)
+    if os.path.exists(ent_file):
+        os.remove(ent_file)
 
 def main():
     key_id = os.environ.get('APP_STORE_CONNECT_API_KEY_ID') or '795KRDT33X'
@@ -48,7 +81,7 @@ def main():
         print(f'::error ::IPA file not found at {ipa_path}')
         sys.exit(1)
 
-    print('Sealing IPA with explicit NetworkExtension entitlements and DER encoding...')
+    print('Sealing IPA with exact Provisioning Profile entitlements and DER encoding...')
     work_dir = tempfile.mkdtemp()
     with zipfile.ZipFile(ipa_path, 'r') as zip_ref:
         zip_ref.extractall(work_dir)
@@ -58,27 +91,40 @@ def main():
     identity = 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'
     keychain = os.environ.get('KEYCHAIN_PATH')
 
-    if os.path.exists(ext_dir) and os.path.exists('TunnelExtension/TunnelExtension.entitlements'):
-        sign_cmd = [
-            'codesign', '--force', '--sign', identity,
-            '--entitlements', 'TunnelExtension/TunnelExtension.entitlements',
-            '--generate-entitlement-der'
-        ]
-        if keychain: sign_cmd += ['--keychain', keychain]
-        sign_cmd.append(ext_dir)
-        print('Signing Extension:', ' '.join(sign_cmd))
-        subprocess.run(sign_cmd, check=True)
+    # Sign embedded frameworks if any
+    fw_dir = os.path.join(app_dir, 'Frameworks')
+    if os.path.isdir(fw_dir):
+        for fw in os.listdir(fw_dir):
+            fp = os.path.join(fw_dir, fw)
+            c = ['codesign', '--force', '--sign', identity, '--timestamp=none']
+            if keychain: c += ['--keychain', keychain]
+            c.append(fp)
+            subprocess.run(c, check=True)
 
-    if os.path.exists(app_dir) and os.path.exists('OBhoD/App/OBhoD.entitlements'):
-        sign_cmd = [
-            'codesign', '--force', '--sign', identity,
-            '--entitlements', 'OBhoD/App/OBhoD.entitlements',
-            '--generate-entitlement-der'
-        ]
-        if keychain: sign_cmd += ['--keychain', keychain]
-        sign_cmd.append(app_dir)
-        print('Signing App:', ' '.join(sign_cmd))
-        subprocess.run(sign_cmd, check=True)
+    # 1. Sign Extension
+    if os.path.exists(ext_dir):
+        ext_prov = os.path.join(ext_dir, 'embedded.mobileprovision')
+        if not os.path.exists(ext_prov):
+            ext_prov = 'keys/OBhod_ext.mobileprovision'
+        ext_ent = extract_entitlements_from_provision(ext_prov)
+        if ext_ent:
+            sign_item(ext_dir, ext_ent, identity, keychain)
+
+    # 2. Sign Main App
+    if os.path.exists(app_dir):
+        app_prov = os.path.join(app_dir, 'embedded.mobileprovision')
+        if not os.path.exists(app_prov):
+            app_prov = 'keys/OBhod_app.mobileprovision'
+        app_ent = extract_entitlements_from_provision(app_prov)
+        if app_ent:
+            sign_item(app_dir, app_ent, identity, keychain)
+
+    print('=== VERIFYING CODESIGN OF APP ===')
+    subprocess.run(['codesign', '-d', '--entitlements', ':-', app_dir])
+
+    if os.path.exists(ext_dir):
+        print('=== VERIFYING CODESIGN OF EXTENSION ===')
+        subprocess.run(['codesign', '-d', '--entitlements', ':-', ext_dir])
 
     os.remove(ipa_path)
     with zipfile.ZipFile(ipa_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
@@ -102,6 +148,7 @@ def main():
     res = subprocess.run(cmd)
     if res.returncode != 0:
         print(f'::warning ::altool finished with exit code {res.returncode}')
+        sys.exit(res.returncode)
     else:
         print('🎉 SUCCESS! Application successfully uploaded to TestFlight!')
 
