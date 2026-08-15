@@ -22,6 +22,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
