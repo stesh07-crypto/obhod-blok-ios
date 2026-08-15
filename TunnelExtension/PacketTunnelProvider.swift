@@ -71,7 +71,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         proxySettings.autoProxyConfigurationEnabled = true
         let pacScript = """
         function FindProxyForURL(url, host) {
-            return "SOCKS5 127.0.0.1:1080; SOCKS 127.0.0.1:1080; DIRECT";
+            return "SOCKS5 10.77.0.2:1080; SOCKS 10.77.0.2:1080; DIRECT";
         }
         """
         proxySettings.proxyAutoConfigurationJavaScript = pacScript

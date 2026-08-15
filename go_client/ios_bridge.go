@@ -400,7 +400,7 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 				return
 			}
 			defer dev.Close()
-			socksAddr := "127.0.0.1:1080"
+			socksAddr := "0.0.0.0:1080"
 			logFn(fmt.Sprintf("[SOCKS] Запуск SOCKS5 на %s...", socksAddr), false)
 			if err := runSocks5Server(ctx, socksAddr, tnet); err != nil {
 				logFn(fmt.Sprintf("[SOCKS] Сервер остановлен: %v", err), true)

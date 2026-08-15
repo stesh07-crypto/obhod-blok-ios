@@ -381,10 +381,6 @@ private struct ProfileCardView: View {
                     }
                 }
 
-                Text(profile.peer)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
 
                 HStack(spacing: 8) {
                     Text(profile.expirationBadge)
