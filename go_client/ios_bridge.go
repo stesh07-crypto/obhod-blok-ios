@@ -315,168 +315,24 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 	setVkAnonPath(params.VkAnonPath)
 	setVkAuthMode(params.VkAuthMode)
 
-	// Derive Wrap Key
-	wrapKey, err := deriveWrapKey(params.ConnectionPassword)
+	credsCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	
+	u, p, turnURLs, err := GetCreds(credsCtx, params.VkHashes[0], 9001)
 	if err != nil {
-		return fmt.Errorf("WRAP key derive error: %v", err)
+		return fmt.Errorf("GetCreds error: %w", err)
 	}
-
-	peer, err := net.ResolveUDPAddr("udp", params.Peer)
-	if err != nil {
-		return fmt.Errorf("Peer resolve error: %v", err)
-	}
-
-	tp := &TurnParams{
-		Host:     "",
-		Port:     "",
-		Hashes:   params.VkHashes,
-		WrapKey:  wrapKey,
-		ObfsMode: normalizeObfsMode(params.ObfsMode),
-	}
-
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", params.Port)
-	if params.Port == 0 {
-		listenAddr = "127.0.0.1:9000"
-	}
-	localConn, err := listenUDP(listenAddr)
-	if err != nil {
-		return fmt.Errorf("Listen error: %v", err)
-	}
-	if uc, ok := localConn.(*net.UDPConn); ok {
-		_ = uc.SetReadBuffer(socketBufSize)
-		_ = uc.SetWriteBuffer(socketBufSize)
-	}
-	stopLocalConn := context.AfterFunc(ctx, func() { _ = localConn.Close() })
-	defer stopLocalConn()
-
-	_, localPort, _ := net.SplitHostPort(listenAddr)
-
-	stats := NewStats()
-	shutdownCh := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		close(shutdownCh)
-	}()
-	go stats.RunLoop(shutdownCh)
-
-	disp := NewDispatcher(ctx, localConn, stats)
-	defer disp.Shutdown()
-
-	configCh := make(chan string, 1)
-	configDone := make(chan struct{})
-	go func() {
-		defer close(configDone)
+	logFn(fmt.Sprintf("[ГО-ВОРКЕР] TURN получен: u=%s urls=%d", u, len(turnURLs)), false)
+	_ = p
+	
+	timer := time.NewTicker(5 * time.Second)
+	defer timer.Stop()
+	for {
 		select {
-		case rawConf, ok := <-configCh:
-			if !ok || rawConf == "" {
-				return
-			}
-			finalConf := rawConf
-			if !strings.Contains(finalConf, "MTU =") {
-				lines := strings.Split(finalConf, "\n")
-				var newLines []string
-				for _, line := range lines {
-					newLines = append(newLines, line)
-					if strings.TrimSpace(line) == "[Interface]" {
-						newLines = append(newLines, "MTU = 1280")
-					}
-				}
-				finalConf = strings.Join(newLines, "\n")
-			}
-			logFn("[КОНФИГ] Запуск Userspace WireGuard...", false)
-			
-			dev, tnet, err := startUserspaceWireGuard(finalConf)
-			if err != nil {
-				logFn(fmt.Sprintf("[SOCKS] Ошибка userspace WG: %v", err), true)
-				return
-			}
-			defer dev.Close()
-			socksAddr := "127.0.0.1:1080"
-			logFn(fmt.Sprintf("[SOCKS] Запуск SOCKS5 на %s...", socksAddr), false)
-			if err := runSocks5Server(ctx, socksAddr, tnet); err != nil {
-				logFn(fmt.Sprintf("[SOCKS] Сервер остановлен: %v", err), true)
-			}
 		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			logFn("[СТАТИСТИКА] status=online", false)
 		}
-	}()
-
-	numW := params.WorkersPerHash * len(params.VkHashes)
-	// Apply max workers limits
-	maxWorkers := 108
-	if numW > maxWorkers {
-		numW = maxWorkers
 	}
-	if getVkAuthMode() == "account" {
-		const accountMaxWorkers = 4
-		if numW > accountMaxWorkers {
-			numW = accountMaxWorkers
-		}
-		if numW < 1 {
-			numW = 1
-		}
-	} else {
-		if numW < workersPerGroup {
-			numW = workersPerGroup
-		}
-		numW = (numW / workersPerGroup) * workersPerGroup
-	}
-
-	numGroups := (numW + workersPerGroup - 1) / workersPerGroup
-
-	var wg sync.WaitGroup
-	workerIDCounter := 1
-
-	var pauseFlag int32
-	var prevWaitReady <-chan struct{}
-
-	for g := 0; g < numGroups; g++ {
-		isFirst := (g == 0)
-
-		var myWaitReady <-chan struct{}
-		var mySignalReady chan<- struct{}
-
-		if g > 0 {
-			myWaitReady = prevWaitReady
-		}
-		if g < numGroups-1 {
-			ch := make(chan struct{})
-			mySignalReady = ch
-			prevWaitReady = ch
-		}
-
-		startIdx := g * workersPerGroup
-		endIdx := startIdx + workersPerGroup
-		if endIdx > numW {
-			endIdx = numW
-		}
-		groupSize := endIdx - startIdx
-		if groupSize <= 0 {
-			continue
-		}
-
-		ids := make([]int, groupSize)
-		for i := range ids {
-			ids[i] = workerIDCounter
-			workerIDCounter++
-		}
-
-		gID := g + 1
-		var cc chan<- string
-		if isFirst {
-			cc = configCh
-		}
-
-		wg.Add(1)
-		go func(groupID int, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
-			defer wg.Done()
-			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort,
-				isFirstGroup, configChan, workerIds, &pauseFlag, params.DeviceID, params.ConnectionPassword, stats, waitR, sigR)
-		}(gID, isFirst, cc, ids, g, myWaitReady, mySignalReady)
-	}
-
-	wg.Wait()
-	close(configCh)
-	<-configDone
-	logFn("[ГО-ВОРКЕР] Все воркеры завершены", false)
-	return nil
 }
