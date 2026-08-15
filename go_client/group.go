@@ -16,23 +16,8 @@ const workersPerGroup = 9
 
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
-func WorkerGroup(
-	ctx context.Context,
-	groupID int,
-	hashIndex int,
-	tp *TurnParams,
-	peer *net.UDPAddr,
-	d *Dispatcher,
-	localPort string,
-	getConfig bool,
-	configCh chan<- string,
-	workerIDs []int,
-	pauseFlag *int32,
-	deviceID, password string,
-	stats *Stats,
-	waitReady <-chan struct{},
-	signalReady chan<- struct{},
-) {
+func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, peer *net.UDPAddr, d *Dispatcher, localPort string,
+	configChan chan<- string, workerIDs []int, pauseFlag *int32, deviceID, password string, stats *Stats, waitReady <-chan struct{}, signalReady chan<- struct{}, configSent *int32, configRequestInFlight *int32) {
 	// Каскадный запуск: ждем свою очередь
 	if waitReady != nil {
 		log.Printf("[ГРУППА #%d] Ожидание сигнала от предыдущей группы...", groupID)
@@ -41,11 +26,6 @@ func WorkerGroup(
 		case <-ctx.Done():
 			return
 		}
-	}
-
-	var configSent int32
-	if !getConfig {
-		configSent = 1
 	}
 
 	// Doze-mode пауза
@@ -70,12 +50,14 @@ func WorkerGroup(
 		creds = &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
 	} else {
 		log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
+		if signalReady != nil {
+			close(signalReady)
+		}
 		return
 	}
 
 	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
 
-	var configRequestInFlight int32
 	var wg sync.WaitGroup
 	var credsMu sync.RWMutex
 	var refreshMu sync.Mutex
@@ -136,7 +118,7 @@ func WorkerGroup(
 				}
 			}
 
-			shouldGetConfig := getConfig
+			shouldGetConfig := (configChan != nil)
 			attempt := 0
 
 			for {
@@ -145,12 +127,12 @@ func WorkerGroup(
 				}
 
 				getConf := false
-				if shouldGetConfig && atomic.LoadInt32(&configSent) == 0 {
-					getConf = atomic.CompareAndSwapInt32(&configRequestInFlight, 0, 1)
+				if shouldGetConfig && atomic.LoadInt32(configSent) == 0 {
+					getConf = atomic.CompareAndSwapInt32(configRequestInFlight, 0, 1)
 				}
 				var cc chan<- string
 				if getConf {
-					cc = configCh
+					cc = configChan
 				}
 
 				credsMu.RLock()
@@ -164,9 +146,9 @@ func WorkerGroup(
 				quotaRetry := false
 				if getConf {
 					if configDelivered {
-						atomic.StoreInt32(&configSent, 1)
+						atomic.StoreInt32(configSent, 1)
 					} else {
-						atomic.StoreInt32(&configRequestInFlight, 0)
+						atomic.StoreInt32(configRequestInFlight, 0)
 					}
 				}
 
