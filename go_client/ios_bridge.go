@@ -326,7 +326,11 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 		return fmt.Errorf("WRAP key derive error: %v", err)
 	}
 
-	peer, err := net.ResolveUDPAddr("udp", params.Peer)
+	peerStr := params.Peer
+	if !strings.Contains(peerStr, ":") {
+		peerStr += ":443"
+	}
+	peer, err := net.ResolveUDPAddr("udp", peerStr)
 	if err != nil {
 		return fmt.Errorf("Peer resolve error: %v", err)
 	}
