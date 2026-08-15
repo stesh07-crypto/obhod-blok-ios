@@ -58,6 +58,12 @@ jobs:
           chmod +x scripts/build-ios-xcframework.sh
           bash scripts/build-ios-xcframework.sh
 
+      - name: Set Build Number
+        run: |
+          echo "Setting CFBundleVersion to ${{ github.run_number }}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "OBhoD/App/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "TunnelExtension/Info.plist" || true
+
       - name: Generate Xcode project
         run: xcodegen generate
 
