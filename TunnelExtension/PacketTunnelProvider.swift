@@ -62,8 +62,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.mtu = 1420
 
         let ipv4 = NEIPv4Settings(addresses: ["10.77.0.2"], subnetMasks: ["255.255.255.0"])
-        ipv4.includedRoutes = [NEIPv4Route.default()]
+        // Do NOT include default route to avoid intercepting Go traffic (GetCreds loop)
+        ipv4.includedRoutes = []
         settings.ipv4Settings = ipv4
+
+        // Setup PAC file to route traffic to SOCKS5 proxy raised by Go
+        let proxySettings = NEProxySettings()
+        proxySettings.autoProxyConfigurationEnabled = true
+        let pacScript = """
+        function FindProxyForURL(url, host) {
+            return "SOCKS 127.0.0.1:1080";
+        }
+        """
+        proxySettings.proxyAutoConfigurationJavaScript = pacScript
+        proxySettings.excludeSimpleHostnames = true
+        settings.proxySettings = proxySettings
 
         let dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
         dnsSettings.matchDomains = [""]
