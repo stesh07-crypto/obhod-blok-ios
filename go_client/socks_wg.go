@@ -158,23 +158,4 @@ func (c *wgQuickConfig) ipcRequest() string {
 	return b.String()
 }
 
-// startUserspaceWireGuard поднимает WG через NativeTun (без SOCKS5 и netstack).
-func startUserspaceWireGuard(conf string) (*device.Device, error) {
-	cfg, err := parseWgQuick(conf)
-	if err != nil {
-		return nil, err
-	}
-	tunDev := NewNativeTun(cfg.mtu)
-	
-	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "[WG-IOS] "))
-	if err := dev.IpcSet(cfg.ipcRequest()); err != nil {
-		dev.Close()
-		return nil, fmt.Errorf("IpcSet: %w", err)
-	}
-	if err := dev.Up(); err != nil {
-		dev.Close()
-		return nil, fmt.Errorf("Up: %w", err)
-	}
-	log.Printf("[IOS-TUN] Userspace WireGuard up (addr=%v endpoint=%s)", cfg.addresses, cfg.endpoint)
-	return dev, nil
-}
+

@@ -408,7 +408,7 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 			}
 			logFn("[КОНФИГ] Запуск Userspace WireGuard...", false)
 			
-			dev, err := startUserspaceWireGuard(finalConf)
+			dev, _, err := startUserspaceWireGuard(finalConf)
 			if err != nil {
 				logFn(fmt.Sprintf("[IOS-TUN] Ошибка userspace WG: %v", err), true)
 				return
