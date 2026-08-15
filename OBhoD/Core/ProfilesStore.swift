@@ -151,36 +151,51 @@ final class ProfilesStore: ObservableObject {
     // MARK: – Refresh Subscriptions
 
     func refreshSubscriptions() async -> (refreshed: Int, failed: Int) {
-        guard !lastSubscriptionURL.isEmpty, let url = URL(string: lastSubscriptionURL) else {
+        var urlsToFetch = Set<String>()
+        if !lastSubscriptionURL.isEmpty, lastSubscriptionURL.starts(with: "http") {
+            urlsToFetch.insert(lastSubscriptionURL)
+        }
+        for p in profiles {
+            if !p.subscriptionUrl.isEmpty, p.subscriptionUrl.starts(with: "http") {
+                urlsToFetch.insert(p.subscriptionUrl)
+            }
+        }
+        
+        if urlsToFetch.isEmpty {
             return (0, 0)
         }
 
         isRefreshing = true
         defer { isRefreshing = false }
 
-        do {
-            let parsed = try await SubscriptionImport.fetch(url: url)
-            var newProfiles = profiles
+        var totalRefreshed = 0
+        var totalFailed = 0
 
-            for p in parsed.profiles {
-                if let existingIdx = newProfiles.firstIndex(where: { $0.peer == p.peer || ($0.name == p.name && !p.name.isEmpty) }) {
-                    // Update server details while keeping local traffic stats
-                    newProfiles[existingIdx].vkHashes = p.vkHashes
-                    newProfiles[existingIdx].workersPerHash = p.workersPerHash
-                    newProfiles[existingIdx].password = p.password
-                    newProfiles[existingIdx].expiresAt = p.expiresAt
-                    newProfiles[existingIdx].subscriptionUrl = url.absoluteString
-                } else {
-                    newProfiles.append(p)
+        for urlString in urlsToFetch {
+            guard let url = URL(string: urlString) else { continue }
+            do {
+                let parsed = try await SubscriptionImport.fetch(url: url)
+                var newProfiles = profiles
+
+                for p in parsed.profiles {
+                    if let existingIdx = newProfiles.firstIndex(where: { $0.peer == p.peer || ($0.name == p.name && !p.name.isEmpty) }) {
+                        newProfiles[existingIdx].vkHashes = p.vkHashes
+                        newProfiles[existingIdx].workersPerHash = p.workersPerHash
+                        newProfiles[existingIdx].password = p.password
+                        newProfiles[existingIdx].expiresAt = p.expiresAt
+                        newProfiles[existingIdx].subscriptionUrl = url.absoluteString
+                    } else {
+                        newProfiles.append(p)
+                    }
                 }
+                profiles = newProfiles
+                totalRefreshed += parsed.profiles.count
+            } catch {
+                totalFailed += 1
             }
-
-            profiles = newProfiles
-            save()
-            return (parsed.profiles.count, 0)
-        } catch {
-            return (0, 1)
         }
+        save()
+        return (totalRefreshed, totalFailed)
     }
 
     // MARK: – Persistence
