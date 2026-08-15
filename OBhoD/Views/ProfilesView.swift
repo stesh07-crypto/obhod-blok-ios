@@ -5,6 +5,7 @@ struct ProfilesView: View {
     @EnvironmentObject var profilesStore: ProfilesStore
 
     @State private var showSubscriptionsSheet = false
+    @State private var initialURL: String? = nil
     @State private var editingProfile: ConnectionProfile? = nil
     @State private var showToast = false
     @State private var toastMessage = ""
@@ -116,8 +117,10 @@ struct ProfilesView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showSubscriptionsSheet) {
-                SubscriptionsSheet()
+            .sheet(isPresented: $showSubscriptionsSheet, onDismiss: {
+                initialURL = nil
+            }) {
+                SubscriptionsSheet(initialURL: initialURL)
             }
             .sheet(item: $editingProfile) { profile in
                 ProfileEditView(profile: profile)
@@ -137,10 +140,8 @@ struct ProfilesView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .importSubscriptionURL)) { note in
             if let url = note.object as? URL {
+                initialURL = url.absoluteString
                 showSubscriptionsSheet = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NotificationCenter.default.post(name: .beginImportFromURL, object: url)
-                }
             }
         }
     }

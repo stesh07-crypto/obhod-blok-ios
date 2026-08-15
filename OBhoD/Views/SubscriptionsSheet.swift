@@ -4,13 +4,17 @@ struct SubscriptionsSheet: View {
     @EnvironmentObject var profilesStore: ProfilesStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var urlText = ""
+    @State private var urlText: String
     @State private var isLoading = false
     @State private var errorMessage: String? = nil
     @State private var pendingProfiles: [ConnectionProfile] = []
     @State private var showConfirm = false
     @State private var parsedName: String? = nil
     @State private var parsedExpires: Int64 = 0
+
+    init(initialURL: String? = nil) {
+        _urlText = State(initialValue: initialURL ?? "")
+    }
 
     var body: some View {
         NavigationView {
@@ -123,9 +127,8 @@ struct SubscriptionsSheet: View {
                 Text("\(parsedName ?? "OBhoD")\nНайдено профилей: \(pendingProfiles.count)\nСтатус: \(badge)")
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .beginImportFromURL)) { note in
-            if let url = note.object as? URL {
-                urlText = url.absoluteString
+        .onAppear {
+            if !urlText.isEmpty {
                 Task { await importFromURL() }
             }
         }
