@@ -11,7 +11,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+
 )
 
 type wgQuickConfig struct {
@@ -158,25 +158,23 @@ func (c *wgQuickConfig) ipcRequest() string {
 	return b.String()
 }
 
-// startUserspaceWireGuard поднимает WG через netstack (без VpnService / kernel TUN).
-func startUserspaceWireGuard(conf string) (*device.Device, *netstack.Net, error) {
+// startUserspaceWireGuard поднимает WG через NativeTun (без SOCKS5 и netstack).
+func startUserspaceWireGuard(conf string) (*device.Device, error) {
 	cfg, err := parseWgQuick(conf)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	tunDev, tnet, err := netstack.CreateNetTUN(cfg.addresses, cfg.dns, cfg.mtu)
-	if err != nil {
-		return nil, nil, fmt.Errorf("CreateNetTUN: %w", err)
-	}
-	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "[WG-SOCKS] "))
+	tunDev := NewNativeTun(cfg.mtu)
+	
+	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "[WG-IOS] "))
 	if err := dev.IpcSet(cfg.ipcRequest()); err != nil {
 		dev.Close()
-		return nil, nil, fmt.Errorf("IpcSet: %w", err)
+		return nil, fmt.Errorf("IpcSet: %w", err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
-		return nil, nil, fmt.Errorf("Up: %w", err)
+		return nil, fmt.Errorf("Up: %w", err)
 	}
-	log.Printf("[SOCKS] Userspace WireGuard up (addr=%v endpoint=%s)", cfg.addresses, cfg.endpoint)
-	return dev, tnet, nil
+	log.Printf("[IOS-TUN] Userspace WireGuard up (addr=%v endpoint=%s)", cfg.addresses, cfg.endpoint)
+	return dev, nil
 }

@@ -408,17 +408,13 @@ func runOnce(ctx context.Context, params TunnelParams, logFn func(line string, i
 			}
 			logFn("[КОНФИГ] Запуск Userspace WireGuard...", false)
 			
-			dev, tnet, err := startUserspaceWireGuard(finalConf)
+			dev, err := startUserspaceWireGuard(finalConf)
 			if err != nil {
-				logFn(fmt.Sprintf("[SOCKS] Ошибка userspace WG: %v", err), true)
+				logFn(fmt.Sprintf("[IOS-TUN] Ошибка userspace WG: %v", err), true)
 				return
 			}
 			defer dev.Close()
-			socksAddr := "0.0.0.0:1080"
-			logFn(fmt.Sprintf("[SOCKS] Запуск SOCKS5 на %s...", socksAddr), false)
-			if err := runSocks5Server(ctx, socksAddr, tnet); err != nil {
-				logFn(fmt.Sprintf("[SOCKS] Сервер остановлен: %v", err), true)
-			}
+			logFn("[IOS-TUN] Готов к приему трафика", false)
 		case <-ctx.Done():
 		}
 	}()

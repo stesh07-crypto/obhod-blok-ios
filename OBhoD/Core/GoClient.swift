@@ -30,6 +30,26 @@ enum GoClient {
             GoClient.statsHandler?(s)
         }
     }
+    
+    private static var packetHandler: ((Data) -> Void)?
+
+    static func setPacketHandler(_ handler: @escaping (Data) -> Void) {
+        packetHandler = handler
+        let callback: @convention(c) (UnsafeRawPointer?, Int32) -> Void = { dataPtr, length in
+            guard let ptr = dataPtr, length > 0 else { return }
+            let data = Data(bytes: ptr, count: Int(length))
+            GoClient.packetHandler?(data)
+        }
+        WDTT_SetWriteCallback(callback)
+    }
+
+    static func writePacket(_ data: Data) {
+        data.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress {
+                WDTT_WritePacket(UnsafeMutableRawPointer(mutating: baseAddress), Int32(data.count))
+            }
+        }
+    }
 
     // MARK: – Control
 

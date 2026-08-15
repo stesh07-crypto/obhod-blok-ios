@@ -62,22 +62,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.mtu = 1420
 
         let ipv4 = NEIPv4Settings(addresses: ["10.77.0.2"], subnetMasks: ["255.255.255.0"])
-        // Do NOT include default route to avoid intercepting Go traffic (GetCreds loop)
-        ipv4.includedRoutes = []
+        ipv4.includedRoutes = [NEIPv4Route.default()]
         settings.ipv4Settings = ipv4
-
-        // Setup PAC file to route traffic to SOCKS5 proxy raised by Go
-        let proxySettings = NEProxySettings()
-        proxySettings.autoProxyConfigurationEnabled = true
-        let pacScript = """
-        function FindProxyForURL(url, host) {
-            return "SOCKS5 127.0.0.1:1080; SOCKS 127.0.0.1:1080; DIRECT";
-        }
-        """
-        proxySettings.proxyAutoConfigurationJavaScript = pacScript
-        proxySettings.excludeSimpleHostnames = true
-        proxySettings.matchDomains = [""]
-        settings.proxySettings = proxySettings
 
         let dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
         dnsSettings.matchDomains = [""]
@@ -93,7 +79,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             self.defaults?.set(true, forKey: AppGroup.Keys.tunnelRunning)
             NSLog("[WDTT-Ext] Tunnel started successfully")
+            
+            // Start reading packets from Go and writing to iOS
+            GoClient.setPacketHandler { [weak self] data in
+                self?.packetFlow.writePackets([data], withProtocols: [NSNumber(value: AF_INET)])
+            }
+            
+            // Start reading packets from iOS and writing to Go
+            self.readPackets()
+            
             completionHandler(nil)
+        }
+    }
+
+    private func readPackets() {
+        packetFlow.readPackets { [weak self] packets, _ in
+            guard let self = self else { return }
+            for packet in packets {
+                GoClient.writePacket(packet)
+            }
+            self.readPackets()
         }
     }
 
