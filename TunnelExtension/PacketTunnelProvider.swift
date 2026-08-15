@@ -71,11 +71,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         proxySettings.autoProxyConfigurationEnabled = true
         let pacScript = """
         function FindProxyForURL(url, host) {
-            return "SOCKS 127.0.0.1:1080";
+            return "SOCKS5 127.0.0.1:1080; SOCKS 127.0.0.1:1080; DIRECT";
         }
         """
         proxySettings.proxyAutoConfigurationJavaScript = pacScript
         proxySettings.excludeSimpleHostnames = true
+        proxySettings.matchDomains = [""]
         settings.proxySettings = proxySettings
 
         let dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
