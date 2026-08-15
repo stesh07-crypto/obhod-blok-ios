@@ -268,6 +268,11 @@ func runTunnelLoop(ctx context.Context, params TunnelParams) {
 				return
 			}
 			iosLog(fmt.Sprintf("[ВОРКЕР] Ошибка: %v — переподключение...", err), true)
+			time.Sleep(3 * time.Second)
+		} else {
+			// If runOnce completes without error (e.g., config changes or manual shutdown)
+			// we should also sleep a bit to avoid hot-looping if it exits instantly.
+			time.Sleep(1 * time.Second)
 		}
 	}
 }

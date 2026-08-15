@@ -232,11 +232,7 @@ private struct NeonConnectHeroCard: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.primary)
 
-                if let peer = currentProfile?.peer, !peer.isEmpty {
-                    Text(peer)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
+
 
                 if let expBadge = currentProfile?.expirationBadge {
                     Text(expBadge)
