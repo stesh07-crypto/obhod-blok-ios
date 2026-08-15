@@ -213,6 +213,19 @@ func iosStats(stats string) {
 	C.bridge_stats(cb, cs)
 }
 
+type uiLogWriter struct{}
+
+func (w uiLogWriter) Write(p []byte) (n int, err error) {
+	line := string(p)
+	line = strings.TrimSuffix(line, "\n")
+	iosLog(line, false)
+	return len(p), nil
+}
+
+func init() {
+	log.SetOutput(uiLogWriter{})
+}
+
 func parseHashes(raw string) []string {
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == '\n' || r == ' ' || r == '\t'
