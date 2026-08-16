@@ -119,6 +119,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 			shouldGetConfig := (configChan != nil)
 			attempt := 0
+			transientFailures := 0
 
 			for {
 				if ctx.Err() != nil {
@@ -139,8 +140,10 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				credsSnapshot.TurnURLs = cloneStringSlice(creds.TurnURLs)
 				credsMu.RUnlock()
 
+				sessionStarted := time.Now()
 				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
 					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
+				sessionLifetime := time.Since(sessionStarted)
 
 				quotaRetry := false
 				transientSocketRetry := false
@@ -191,13 +194,26 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						return
 					}
 
+					// A connection that lived for a meaningful period proves the
+					// network recovered; do not carry old failure streaks forever.
+					if sessionLifetime >= 20*time.Second {
+						attempt = 0
+						transientFailures = 0
+					}
 					attempt++
+
+					if transientSocketRetry {
+						transientFailures++
+					} else {
+						transientFailures = 0
+					}
+
 					switch {
 					case transientSocketRetry:
 						// On iOS Wi-Fi/cellular handoff may invalidate only the local
 						// socket. TURN credentials remain valid, so keep them and retry
-						// quickly instead of killing this worker or hitting auth again.
-						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повторяем с теми же TURN-кредами (попытка %d): %s", wid, attempt, errStr)
+						// without hitting VK authentication again.
+						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повторяем с теми же TURN-кредами (попытка %d, серия=%d): %s", wid, attempt, transientFailures, errStr)
 					case isTurnQuota:
 						log.Printf("[ВОРКЕР #%d] [TURN] Квота relay исчерпана (один аккаунт VK = мало слотов), ждём: %s", wid, errStr)
 					case turnAllocAttrMissing:
@@ -218,6 +234,10 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						log.Printf("[ВОРКЕР #%d] Невосстановимая удалённая ошибка, завершение: %s", wid, errStr)
 						return
 					}
+				} else {
+					// A cleanly completed session also breaks a failure streak.
+					attempt = 0
+					transientFailures = 0
 				}
 
 				if ctx.Err() != nil {
@@ -226,7 +246,14 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
 				if transientSocketRetry {
-					retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
+					if transientFailures >= 3 {
+						// The device is probably offline rather than merely switching
+						// interfaces. Back off to protect battery and VK/TURN quota.
+						retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
+						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Сеть долго недоступна; dormancy %v", wid, retryDelay)
+					} else {
+						retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
+					}
 				} else if quotaRetry {
 					retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
 				}
