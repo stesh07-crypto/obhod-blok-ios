@@ -61,6 +61,7 @@ final class TunnelManager: ObservableObject {
     private var lastRequestedProfile: ConnectionProfile?
     private var autoReconnectAttempts = 0
     private var autoReconnectTask: Task<Void, Never>?
+    private var isAutoReconnectLaunching = false
 
     // MARK: NetworkExtension
 
@@ -88,6 +89,10 @@ final class TunnelManager: ObservableObject {
         }
         guard !isRunning, !isDisconnecting else { return }
 
+        if !isAutoReconnectLaunching {
+            autoReconnectAttempts = 0
+        }
+
         autoReconnectTask?.cancel()
         autoReconnectTask = nil
         lastRequestedProfile = profile
@@ -96,9 +101,12 @@ final class TunnelManager: ObservableObject {
         let requestGeneration = connectionGeneration
 
         isConnecting = true
-        stats = "Подключение…"
-        logs.removeAll()
-        unreadErrors = 0
+        stats = isAutoReconnectLaunching ? "Переподключение…" : "Подключение…"
+
+        if !isAutoReconnectLaunching {
+            logs.removeAll()
+            unreadErrors = 0
+        }
         remoteLogMirror.removeAll()
         resetLiveStats()
 
@@ -119,6 +127,7 @@ final class TunnelManager: ObservableObject {
         autoReconnectTask?.cancel()
         autoReconnectTask = nil
         autoReconnectAttempts = 0
+        isAutoReconnectLaunching = false
 
         connectionGeneration &+= 1
         isDisconnecting = true
@@ -238,13 +247,14 @@ final class TunnelManager: ObservableObject {
             autoReconnectTask?.cancel()
             autoReconnectTask = nil
             autoReconnectAttempts = 0
+            isAutoReconnectLaunching = false
             isRunning = true
             isConnecting = false
             isDisconnecting = false
             if connectedSince == nil {
                 connectedSince = Date()
             }
-            if stats == "Подключение…" || stats == "Отключение…" {
+            if stats == "Подключение…" || stats == "Переподключение…" || stats == "Отключение…" {
                 stats = "Подключено"
             }
 
@@ -252,7 +262,9 @@ final class TunnelManager: ObservableObject {
             isRunning = false
             isConnecting = true
             isDisconnecting = false
-            stats = "Подключение…"
+            if stats != "Переподключение…" {
+                stats = "Подключение…"
+            }
 
         case .reasserting:
             isRunning = false
@@ -269,12 +281,15 @@ final class TunnelManager: ObservableObject {
         case .disconnected, .invalid:
             let wasEstablished = connectedSince != nil
             let wasManualStop = isDisconnecting
+            let recoveryAlreadyInProgress = autoReconnectAttempts > 0
             resetDisconnectedState()
 
-            // Extension-level watchdog repairs normal transport failures without
-            // dropping the VPN. This is the final safety net for an actual
-            // NetworkExtension termination while the app is awake.
-            if wasEstablished && !wasManualStop && SettingsStore.shared.autoReconnect {
+            // Normal TURN failures are repaired inside TunnelExtension. This is
+            // a second safety net for a real extension exit/crash while the app
+            // is available to relaunch the VPN session.
+            if (wasEstablished || recoveryAlreadyInProgress),
+               !wasManualStop,
+               SettingsStore.shared.autoReconnect {
                 scheduleAutoReconnect()
             }
 
@@ -289,17 +304,22 @@ final class TunnelManager: ObservableObject {
 
         autoReconnectAttempts += 1
         let attempt = autoReconnectAttempts
-        let delaySeconds: UInt64 = [2, 5, 10][min(attempt - 1, 2)]
+        let delays: [UInt64] = [2, 5, 10]
+        let delaySeconds = delays[min(attempt - 1, delays.count - 1)]
         appendLog("[СЕТЬ] VPN неожиданно остановлен. Автовосстановление \(attempt)/3 через \(delaySeconds)с…", isError: false)
 
         autoReconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self, !self.isRunning, !self.isConnecting, !self.isDisconnecting else { return }
+            guard !Task.isCancelled, let self else { return }
+            guard !self.isRunning, !self.isConnecting, !self.isDisconnecting else {
                 self.autoReconnectTask = nil
-                self.connect(profile: profile)
+                return
             }
+
+            self.autoReconnectTask = nil
+            self.isAutoReconnectLaunching = true
+            self.connect(profile: profile)
+            self.isAutoReconnectLaunching = false
         }
     }
 
@@ -364,8 +384,6 @@ final class TunnelManager: ObservableObject {
             return
         }
 
-        // Startup/reconnect text shares the same App Group slot until the first
-        // structured live-stat snapshot arrives.
         stats = raw
     }
 
