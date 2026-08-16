@@ -4,14 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"net/netip"
 	"strconv"
 	"strings"
-
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-
 )
 
 type wgQuickConfig struct {
@@ -157,5 +152,3 @@ func (c *wgQuickConfig) ipcRequest() string {
 	}
 	return b.String()
 }
-
-
