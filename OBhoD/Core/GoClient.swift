@@ -31,8 +31,19 @@ enum GoClient {
         logHandler = handler
         WDTT_SetLogCallback { linePtr, isError in
             guard let ptr = linePtr else { return }
-            let line = String(cString: ptr)
-            GoClient.logHandler?(line, isError != 0)
+
+            let raw = String(cString: ptr)
+            let line = normalizedLogLine(raw)
+
+            // Live stats have their own structured callback and UI cards. Never
+            // append a new log row every two seconds just to repeat the counters.
+            if line.contains("[СТАТИСТИКА]") {
+                return
+            }
+
+            let inferredError = isError != 0 || looksLikeError(line)
+            guard shouldForwardLog(line, isError: inferredError) else { return }
+            GoClient.logHandler?(line, inferredError)
         }
     }
 
@@ -156,6 +167,54 @@ enum GoClient {
 
     static var isRunning: Bool {
         WDTT_IsRunning() != 0
+    }
+
+    // MARK: Log policy
+
+    private static func normalizedLogLine(_ raw: String) -> String {
+        raw.replacingOccurrences(
+            of: #"^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*"#,
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeError(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        return lower.contains("ошибка") ||
+            lower.contains("fatal") ||
+            lower.contains("failed") ||
+            lower.contains("timeout") ||
+            lower.contains("refused") ||
+            lower.contains("denied") ||
+            lower.contains("не удалось")
+    }
+
+    private static func shouldForwardLog(_ line: String, isError: Bool) -> Bool {
+        if isError { return true }
+
+        let detailed = AppGroup.sharedDefaults?.bool(forKey: AppGroup.Keys.detailedLogs) ?? false
+        if detailed { return true }
+
+        // Default mode intentionally mirrors the Android UI philosophy: show
+        // lifecycle/network events and actionable failures, not one line per
+        // TURN worker, relay packet, VKCalls step or dispatcher registration.
+        let importantPrefixes = [
+            "[VPN]",
+            "[СЕТЬ]",
+            "[КЛИЕНТ]",
+            "[КОНФИГ]",
+            "[IOS-TUN]",
+            "[ГО-ВОРКЕР]",
+            "[ВОРКЕР] ",
+            "[КАПЧА]"
+        ]
+
+        if importantPrefixes.contains(where: { line.hasPrefix($0) }) {
+            return true
+        }
+
+        return line == "Туннель остановлен" || line == "Туннель уже запущен"
     }
 
     private static func timeoutMilliseconds(_ timeout: TimeInterval) -> Int32 {
