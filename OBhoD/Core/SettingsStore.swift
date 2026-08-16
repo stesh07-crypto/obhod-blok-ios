@@ -17,7 +17,10 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(vkAnonPath, forKey: "vk_anon_path") }
     }
     @Published var detailedLogs: Bool {
-        didSet { defaults.set(detailedLogs, forKey: "detailed_logs") }
+        didSet {
+            defaults.set(detailedLogs, forKey: "detailed_logs")
+            AppGroup.sharedDefaults?.set(detailedLogs, forKey: AppGroup.Keys.detailedLogs)
+        }
     }
     @Published var autoReconnect: Bool {
         didSet { defaults.set(autoReconnect, forKey: "auto_reconnect") }
@@ -29,6 +32,7 @@ final class SettingsStore: ObservableObject {
         vkAnonPath    = defaults.string(forKey: "vk_anon_path") ?? "/voice/join"
         detailedLogs  = defaults.bool(forKey: "detailed_logs")
         autoReconnect = defaults.object(forKey: "auto_reconnect") == nil ? true : defaults.bool(forKey: "auto_reconnect")
+        AppGroup.sharedDefaults?.set(detailedLogs, forKey: AppGroup.Keys.detailedLogs)
     }
 
     // DNS presets
