@@ -13,13 +13,7 @@ struct GoTunnelNetworkConfiguration: Decodable {
 
 // MARK: - Swift wrapper over libwdttclient.a (Go C exports)
 
-/// Bridges Swift <-> Go via C FFI.
-///
-/// In network-core-v2 the full Go runtime is owned by TunnelExtension only.
-/// The main application no longer starts or stops this runtime directly.
 enum GoClient {
-
-    // MARK: Callback storage
 
     private static var logHandler: ((String, Bool) -> Void)?
     private static var statsHandler: ((String) -> Void)?
@@ -31,8 +25,21 @@ enum GoClient {
         logHandler = handler
         WDTT_SetLogCallback { linePtr, isError in
             guard let ptr = linePtr else { return }
-            let line = String(cString: ptr)
-            GoClient.logHandler?(line, isError != 0)
+
+            let raw = String(cString: ptr)
+            let normalized = normalizedLogLine(raw)
+
+            // Live counters have a dedicated structured callback/UI. Do not add
+            // another log row every two seconds.
+            if normalized.contains("[СТАТИСТИКА]") {
+                return
+            }
+
+            let inferredError = isError != 0 || looksLikeError(normalized)
+            guard shouldForwardLog(normalized, isError: inferredError) else { return }
+
+            let displayLine = simplifiedDisplayLine(normalized, isError: inferredError)
+            GoClient.logHandler?(displayLine, inferredError)
         }
     }
 
@@ -67,8 +74,6 @@ enum GoClient {
 
     // MARK: Runtime control
 
-    /// Starts the transport bootstrap. A return value of zero means that the
-    /// asynchronous bootstrap was accepted, not that the VPN is already ready.
     @discardableResult
     static func start(
         peer: String,
@@ -112,14 +117,10 @@ enum GoClient {
         )
     }
 
-    /// Wait until TURN/DTLS is established and a valid WireGuard configuration
-    /// has been received. WireGuard is intentionally not started yet.
     static func waitUntilTransportReady(timeout: TimeInterval) -> Bool {
         WDTT_WaitReady(timeoutMilliseconds(timeout)) != 0
     }
 
-    /// Returns the interface/DNS/MTU information extracted from the WireGuard
-    /// configuration received during bootstrap.
     static func networkConfiguration() -> GoTunnelNetworkConfiguration? {
         guard let ptr = WDTT_CopyNetworkConfig() else { return nil }
         defer { WDTT_Free(ptr) }
@@ -129,8 +130,6 @@ enum GoClient {
         return try? JSONDecoder().decode(GoTunnelNetworkConfiguration.self, from: data)
     }
 
-    /// Allows the Go runtime to create and raise WireGuard after iOS has
-    /// successfully installed the packet-tunnel routes.
     @discardableResult
     static func activateWireGuard() -> Bool {
         WDTT_ActivateWireGuard() == 0
@@ -140,12 +139,10 @@ enum GoClient {
         WDTT_WaitWireGuardReady(timeoutMilliseconds(timeout)) != 0
     }
 
-    /// Recreate only the transport attempt. The NetworkExtension/TUN remains up.
     static func notifyNetworkChange() {
         WDTT_NotifyNetworkChange()
     }
 
-    /// Ask the Go watchdog to evaluate the tunnel immediately after wake.
     static func wakeHealthCheck() {
         WDTT_WakeHealthCheck()
     }
@@ -156,6 +153,74 @@ enum GoClient {
 
     static var isRunning: Bool {
         WDTT_IsRunning() != 0
+    }
+
+    // MARK: Log policy
+
+    private static func normalizedLogLine(_ raw: String) -> String {
+        raw.replacingOccurrences(
+            of: #"^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*"#,
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeError(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        return lower.contains("ошибка") ||
+            lower.contains("fatal") ||
+            lower.contains("failed") ||
+            lower.contains("timeout") ||
+            lower.contains("refused") ||
+            lower.contains("denied") ||
+            lower.contains("не удалось")
+    }
+
+    private static func shouldForwardLog(_ line: String, isError: Bool) -> Bool {
+        if isError { return true }
+
+        let detailed = AppGroup.sharedDefaults?.bool(forKey: AppGroup.Keys.detailedLogs) ?? false
+        if detailed { return true }
+
+        // Android-style quiet mode: one useful lifecycle event instead of one
+        // line per session/relay/VKCalls step/dispatcher registration.
+        if line.contains("[DTLS] Соединение установлено") { return true }
+        if line.contains("[READY] Туннель готов") { return true }
+        if line.contains("Креды OK") || line.contains("Первые креды") { return true }
+        if line.contains("Запрос кредов") { return true }
+        if line.contains("капча") || line.contains("КАПЧА") { return true }
+
+        let importantPrefixes = [
+            "[VPN]",
+            "[СЕТЬ]",
+            "[КЛИЕНТ]",
+            "[КОНФИГ]",
+            "[IOS-TUN]",
+            "[ГО-ВОРКЕР]"
+        ]
+        if importantPrefixes.contains(where: { line.hasPrefix($0) }) {
+            return true
+        }
+
+        return line == "Туннель остановлен" || line == "Туннель уже запущен"
+    }
+
+    private static func simplifiedDisplayLine(_ line: String, isError: Bool) -> String {
+        if isError { return line }
+
+        if line.contains("[DTLS] Соединение установлено") {
+            return "[DTLS] Соединение установлено ✓"
+        }
+        if line.contains("[READY] Туннель готов") {
+            return "[READY] Туннель готов к работе ✓"
+        }
+        if line.contains("Креды OK") || line.contains("Первые креды") {
+            return "[ВК] Учетные данные проверены ✓"
+        }
+        if line.contains("Запрос кредов") {
+            return "[ВК] Получение учетных данных…"
+        }
+        return line
     }
 
     private static func timeoutMilliseconds(_ timeout: TimeInterval) -> Int32 {

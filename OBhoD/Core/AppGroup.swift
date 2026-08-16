@@ -16,10 +16,11 @@ enum AppGroup {
         static let stopRequested     = "stop_requested"
 
         // Network-core-v2 settings shared with the extension.
-        static let deviceID   = "device_id"
-        static let goDnsMode  = "goDnsMode"
-        static let obfsMode   = "obfsMode"
-        static let vkAnonPath = "vkAnonPath"
+        static let deviceID     = "device_id"
+        static let goDnsMode    = "goDnsMode"
+        static let obfsMode     = "obfsMode"
+        static let vkAnonPath   = "vkAnonPath"
+        static let detailedLogs = "detailedLogs"
     }
 
     static var sharedDefaults: UserDefaults? {

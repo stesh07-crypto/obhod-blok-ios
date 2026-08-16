@@ -6,19 +6,38 @@ import UIKit
 // MARK: - Log Entry
 
 struct LogEntry: Identifiable {
-    let id = UUID()
-    let message: String
-    let isError: Bool
-    let timestamp = Date()
+    let id: UUID
+    let key: String
+    var message: String
+    var isError: Bool
+    var count: Int
+    var timestamp: Date
+
+    init(
+        id: UUID = UUID(),
+        key: String,
+        message: String,
+        isError: Bool,
+        count: Int = 1,
+        timestamp: Date = Date()
+    ) {
+        self.id = id
+        self.key = key
+        self.message = message
+        self.isError = isError
+        self.count = count
+        self.timestamp = timestamp
+    }
+}
+
+private struct TunnelLiveStatsPayload: Decodable {
+    let activeConnections: Int
+    let uploadBytes: Int64
+    let downloadBytes: Int64
 }
 
 // MARK: - TunnelManager
 
-/// Main-app facade for the VPN.
-///
-/// Network-core-v2 deliberately keeps the actual Go/WireGuard runtime out of
-/// the application process. The app only persists the selected configuration
-/// and asks NetworkExtension to start/stop the tunnel.
 @MainActor
 final class TunnelManager: ObservableObject {
     static let shared = TunnelManager()
@@ -32,8 +51,17 @@ final class TunnelManager: ObservableObject {
     @Published var unreadErrors = 0
     @Published var connectedSince: Date? = nil
 
+    // These are real runtime counters from Go, not profile configuration values.
+    @Published var activeConnections = 0
+    @Published var uploadedBytes: Int64 = 0
+    @Published var downloadedBytes: Int64 = 0
+
     private var isDisconnecting = false
     private var connectionGeneration: UInt64 = 0
+    private var lastRequestedProfile: ConnectionProfile?
+    private var autoReconnectAttempts = 0
+    private var autoReconnectTask: Task<Void, Never>?
+    private var isAutoReconnectLaunching = false
 
     // MARK: NetworkExtension
 
@@ -55,22 +83,32 @@ final class TunnelManager: ObservableObject {
     // MARK: Connect / Disconnect
 
     func connect(profile: ConnectionProfile) {
-        // The same visible button acts as Cancel while a staged bootstrap is in
-        // progress. Older builds silently ignored this tap for up to ~75 seconds.
         if isConnecting {
             disconnect()
             return
         }
         guard !isRunning, !isDisconnecting else { return }
 
+        if !isAutoReconnectLaunching {
+            autoReconnectAttempts = 0
+        }
+
+        autoReconnectTask?.cancel()
+        autoReconnectTask = nil
+        lastRequestedProfile = profile
+
         connectionGeneration &+= 1
         let requestGeneration = connectionGeneration
 
         isConnecting = true
-        stats = "Подключение…"
-        logs.removeAll()
-        unreadErrors = 0
+        stats = isAutoReconnectLaunching ? "Переподключение…" : "Подключение…"
+
+        if !isAutoReconnectLaunching {
+            logs.removeAll()
+            unreadErrors = 0
+        }
         remoteLogMirror.removeAll()
+        resetLiveStats()
 
         defaults.removeObject(forKey: AppGroup.Keys.lastLogLines)
         defaults.removeObject(forKey: AppGroup.Keys.lastStats)
@@ -86,8 +124,11 @@ final class TunnelManager: ObservableObject {
     func disconnect() {
         guard !isDisconnecting else { return }
 
-        // Invalidate any delayed save/load/settle continuation so an old CONNECT
-        // cannot call startVPNTunnel after the user has already cancelled it.
+        autoReconnectTask?.cancel()
+        autoReconnectTask = nil
+        autoReconnectAttempts = 0
+        isAutoReconnectLaunching = false
+
         connectionGeneration &+= 1
         isDisconnecting = true
         isConnecting = false
@@ -113,8 +154,6 @@ final class TunnelManager: ObservableObject {
     func clearLogs() {
         logs.removeAll()
         unreadErrors = 0
-        // Treat the extension's current rolling log as already consumed so it
-        // is not re-added on the next polling tick.
         remoteLogMirror = defaults.stringArray(forKey: AppGroup.Keys.lastLogLines) ?? []
     }
 
@@ -163,15 +202,9 @@ final class TunnelManager: ObservableObject {
             try await manager.saveToPreferences()
             guard isCurrentConnectionGeneration(generation), isConnecting else { return }
 
-            // Always reload the object after saving. NetworkExtension preferences
-            // are asynchronous and using a stale manager here is a common source
-            // of preparing/connecting races on real devices.
             try await manager.loadFromPreferences()
             guard isCurrentConnectionGeneration(generation), isConnecting else { return }
 
-            // Give NECP/preferences a short settling window before asking iOS to
-            // launch the extension. This is intentionally modest because we do
-            // not enable includeAllNetworks in this version.
             try await Task.sleep(nanoseconds: 500_000_000)
             guard isCurrentConnectionGeneration(generation), isConnecting else { return }
 
@@ -211,13 +244,17 @@ final class TunnelManager: ObservableObject {
 
         switch status {
         case .connected:
+            autoReconnectTask?.cancel()
+            autoReconnectTask = nil
+            autoReconnectAttempts = 0
+            isAutoReconnectLaunching = false
             isRunning = true
             isConnecting = false
             isDisconnecting = false
             if connectedSince == nil {
                 connectedSince = Date()
             }
-            if stats == "Подключение…" || stats == "Отключение…" {
+            if stats == "Подключение…" || stats == "Переподключение…" || stats == "Отключение…" {
                 stats = "Подключено"
             }
 
@@ -225,11 +262,11 @@ final class TunnelManager: ObservableObject {
             isRunning = false
             isConnecting = true
             isDisconnecting = false
-            stats = "Подключение…"
+            if stats != "Переподключение…" {
+                stats = "Подключение…"
+            }
 
         case .reasserting:
-            // Keep the original uptime while the extension repairs only its
-            // transport; prevent another CONNECT request until it settles.
             isRunning = false
             isConnecting = true
             isDisconnecting = false
@@ -242,11 +279,53 @@ final class TunnelManager: ObservableObject {
             stats = "Отключение…"
 
         case .disconnected, .invalid:
+            let wasEstablished = connectedSince != nil
+            let wasManualStop = isDisconnecting
+            let recoveryAlreadyInProgress = autoReconnectAttempts > 0
             resetDisconnectedState()
+
+            // Normal TURN failures are repaired inside TunnelExtension. This is
+            // a second safety net for a real extension exit/crash while the app
+            // is available to relaunch the VPN session.
+            if (wasEstablished || recoveryAlreadyInProgress),
+               !wasManualStop,
+               SettingsStore.shared.autoReconnect {
+                scheduleAutoReconnect()
+            }
 
         @unknown default:
             break
         }
+    }
+
+    private func scheduleAutoReconnect() {
+        guard autoReconnectTask == nil, autoReconnectAttempts < 3 else { return }
+        guard let profile = lastRequestedProfile ?? storedActiveProfile() else { return }
+
+        autoReconnectAttempts += 1
+        let attempt = autoReconnectAttempts
+        let delays: [UInt64] = [2, 5, 10]
+        let delaySeconds = delays[min(attempt - 1, delays.count - 1)]
+        appendLog("[СЕТЬ] VPN неожиданно остановлен. Автовосстановление \(attempt)/3 через \(delaySeconds)с…", isError: false)
+
+        autoReconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard !self.isRunning, !self.isConnecting, !self.isDisconnecting else {
+                self.autoReconnectTask = nil
+                return
+            }
+
+            self.autoReconnectTask = nil
+            self.isAutoReconnectLaunching = true
+            self.connect(profile: profile)
+            self.isAutoReconnectLaunching = false
+        }
+    }
+
+    private func storedActiveProfile() -> ConnectionProfile? {
+        guard let data = defaults.data(forKey: AppGroup.Keys.activeProfileJSON) else { return nil }
+        return try? JSONDecoder().decode(ConnectionProfile.self, from: data)
     }
 
     private func resetDisconnectedState() {
@@ -255,6 +334,13 @@ final class TunnelManager: ObservableObject {
         isDisconnecting = false
         connectedSince = nil
         stats = "Ожидание данных..."
+        resetLiveStats()
+    }
+
+    private func resetLiveStats() {
+        activeConnections = 0
+        uploadedBytes = 0
+        downloadedBytes = 0
     }
 
     // MARK: Extension logs / stats
@@ -273,7 +359,7 @@ final class TunnelManager: ObservableObject {
         if let extensionStats = defaults.string(forKey: AppGroup.Keys.lastStats),
            !extensionStats.isEmpty,
            (isRunning || isConnecting) {
-            stats = extensionStats
+            applyLiveStats(extensionStats)
         }
 
         let remote = defaults.stringArray(forKey: AppGroup.Keys.lastLogLines) ?? []
@@ -288,6 +374,19 @@ final class TunnelManager: ObservableObject {
         remoteLogMirror = remote
     }
 
+    private func applyLiveStats(_ raw: String) {
+        if let data = raw.data(using: .utf8),
+           let payload = try? JSONDecoder().decode(TunnelLiveStatsPayload.self, from: data) {
+            activeConnections = max(0, payload.activeConnections)
+            uploadedBytes = max(0, payload.uploadBytes)
+            downloadedBytes = max(0, payload.downloadBytes)
+            stats = "Активных: \(activeConnections) • ↓ \(downloadedMBString) • ↑ \(uploadedMBString)"
+            return
+        }
+
+        stats = raw
+    }
+
     private func logOverlap(old: [String], new: [String]) -> Int {
         let maxOverlap = min(old.count, new.count)
         guard maxOverlap > 0 else { return 0 }
@@ -300,16 +399,65 @@ final class TunnelManager: ObservableObject {
         return 0
     }
 
-    // MARK: Log helpers
+    // MARK: Android-style grouped logs
 
     private func appendLog(_ message: String, isError: Bool) {
-        logs.append(LogEntry(message: message, isError: isError))
-        if logs.count > 150 {
-            logs.removeFirst(logs.count - 150)
+        let key = logKey(for: message, isError: isError)
+
+        if let index = logs.firstIndex(where: { $0.key == key }) {
+            logs[index].message = message
+            logs[index].isError = logs[index].isError || isError
+            logs[index].count += 1
+            logs[index].timestamp = Date()
+            return
+        }
+
+        logs.append(LogEntry(key: key, message: message, isError: isError))
+        if logs.count > 100 {
+            logs.removeFirst(logs.count - 100)
         }
         if isError {
             unreadErrors += 1
         }
+    }
+
+    private func logKey(for message: String, isError: Bool) -> String {
+        let lower = message.lowercased()
+
+        if isError {
+            if lower.contains("fatal_auth") || lower.contains("авторизац") || lower.contains("парол") { return "err_auth" }
+            if lower.contains("connection refused") || lower.contains("refused") { return "err_refused" }
+            if lower.contains("timeout") || lower.contains("deadline") { return "err_timeout" }
+            if lower.contains("dtls") { return "err_dtls" }
+            if lower.contains("кред") || lower.contains("credential") { return "err_creds" }
+            if lower.contains("dns") { return "err_dns" }
+            return "err_" + normalizedLogKey(message)
+        }
+
+        if message.hasPrefix("[СЕТЬ]") { return "network_" + normalizedLogKey(message) }
+        if message.hasPrefix("[VPN]") { return "vpn_" + normalizedLogKey(message) }
+        if message.hasPrefix("[КАПЧА]") { return "captcha_" + normalizedLogKey(message) }
+        if message.contains("WireGuard") || message.hasPrefix("[IOS-TUN]") { return "wireguard_" + normalizedLogKey(message) }
+        if message.hasPrefix("[КОНФИГ]") { return "config_" + normalizedLogKey(message) }
+        return normalizedLogKey(message)
+    }
+
+    private func normalizedLogKey(_ message: String) -> String {
+        var value = message.lowercased()
+        value = value.replacingOccurrences(of: #"#\d+"#, with: "#", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\b\d{1,3}(?:\.\d{1,3}){3}:\d+\b"#, with: "host:port", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\b\d+\b"#, with: "n", options: .regularExpression)
+        return value
+    }
+
+    // MARK: Live stats formatting
+
+    var downloadedMBString: String { formatMB(downloadedBytes) }
+    var uploadedMBString: String { formatMB(uploadedBytes) }
+    var totalMBString: String { formatMB(downloadedBytes + uploadedBytes) }
+
+    private func formatMB(_ bytes: Int64) -> String {
+        String(format: "%.2f МБ", Double(max(0, bytes)) / (1024.0 * 1024.0))
     }
 
     // MARK: Uptime
@@ -336,5 +484,6 @@ final class TunnelManager: ObservableObject {
         defaults.set(SettingsStore.shared.goDnsMode, forKey: AppGroup.Keys.goDnsMode)
         defaults.set(SettingsStore.shared.obfsMode, forKey: AppGroup.Keys.obfsMode)
         defaults.set(SettingsStore.shared.vkAnonPath, forKey: AppGroup.Keys.vkAnonPath)
+        defaults.set(SettingsStore.shared.detailedLogs, forKey: AppGroup.Keys.detailedLogs)
     }
 }
