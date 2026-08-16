@@ -1,0 +1,66 @@
+name: Network Core V2 CI
+
+on:
+  push:
+    branches:
+      - agent/network-core-v2-a
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build network-core-v2
+    runs-on: macos-15
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go_client/go.sum
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          XCODE_PATH=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_PATH" ] && [ -d "$XCODE_PATH/Contents/Developer" ]; then
+            sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Go unit tests
+        working-directory: go_client
+        run: go test ./...
+
+      - name: Build Go XCFramework
+        run: |
+          chmod +x scripts/build-ios-xcframework.sh
+          bash scripts/build-ios-xcframework.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build iOS Simulator app without signing
+        run: |
+          set -o pipefail
+          /usr/bin/xcodebuild build \
+            -project OBhoD.xcodeproj \
+            -scheme OBhoD \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee /tmp/network-core-v2-build.log
+
+      - name: Show failure context
+        if: failure()
+        run: |
+          echo '=== Build log tail ==='
+          tail -n 200 /tmp/network-core-v2-build.log 2>/dev/null || true
