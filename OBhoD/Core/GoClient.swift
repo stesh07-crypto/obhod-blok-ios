@@ -19,28 +19,32 @@ enum GoClient {
     private static var statsHandler: ((String) -> Void)?
     private static var packetHandler: ((Data) -> Void)?
 
+    // C callbacks must not capture Swift context. Keep the callback itself as a
+    // static @convention(c) function pointer and route all work through GoClient.
+    private static let cLogCallback: @convention(c) (UnsafePointer<CChar>?, Int32) -> Void = { linePtr, isError in
+        guard let ptr = linePtr else { return }
+
+        let raw = String(cString: ptr)
+        let normalized = GoClient.normalizedLogLine(raw)
+
+        // Live counters have a dedicated structured callback/UI. Do not add
+        // another log row every two seconds.
+        if normalized.contains("[СТАТИСТИКА]") {
+            return
+        }
+
+        let inferredError = isError != 0 || GoClient.looksLikeError(normalized)
+        guard GoClient.shouldForwardLog(normalized, isError: inferredError) else { return }
+
+        let displayLine = GoClient.simplifiedDisplayLine(normalized, isError: inferredError)
+        GoClient.logHandler?(displayLine, inferredError)
+    }
+
     // MARK: Setup
 
     static func setLogHandler(_ handler: @escaping (String, Bool) -> Void) {
         logHandler = handler
-        WDTT_SetLogCallback { linePtr, isError in
-            guard let ptr = linePtr else { return }
-
-            let raw = String(cString: ptr)
-            let normalized = normalizedLogLine(raw)
-
-            // Live counters have a dedicated structured callback/UI. Do not add
-            // another log row every two seconds.
-            if normalized.contains("[СТАТИСТИКА]") {
-                return
-            }
-
-            let inferredError = isError != 0 || looksLikeError(normalized)
-            guard shouldForwardLog(normalized, isError: inferredError) else { return }
-
-            let displayLine = simplifiedDisplayLine(normalized, isError: inferredError)
-            GoClient.logHandler?(displayLine, inferredError)
-        }
+        WDTT_SetLogCallback(cLogCallback)
     }
 
     static func setStatsHandler(_ handler: @escaping (String) -> Void) {
@@ -188,7 +192,7 @@ enum GoClient {
         if line.contains("[READY] Туннель готов") { return true }
         if line.contains("Креды OK") || line.contains("Первые креды") { return true }
         if line.contains("Запрос кредов") { return true }
-        if line.contains("капча") || line.contains("КАПЧА") { return true }
+        if line.lowercased().contains("капча") { return true }
 
         let importantPrefixes = [
             "[VPN]",
