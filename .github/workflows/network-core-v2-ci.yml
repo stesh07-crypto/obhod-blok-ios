@@ -34,6 +34,10 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Prepare Go modules
+        working-directory: go_client
+        run: go mod tidy
+
       - name: Go unit tests
         working-directory: go_client
         run: go test ./...
