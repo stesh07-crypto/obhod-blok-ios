@@ -50,7 +50,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build iOS Simulator app without signing
+      - name: Build arm64 iOS Simulator app without signing
         run: |
           set -o pipefail
           /usr/bin/xcodebuild build \
@@ -59,12 +59,31 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            EXCLUDED_ARCHS=x86_64 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            2>&1 | tee /tmp/network-core-v2-build.log
+            2>&1 | tee /tmp/network-core-v2-simulator.log
+
+      - name: Build iPhoneOS Release app without signing
+        run: |
+          set -o pipefail
+          /usr/bin/xcodebuild build \
+            -project OBhoD.xcodeproj \
+            -scheme OBhoD \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee /tmp/network-core-v2-device.log
 
       - name: Show failure context
         if: failure()
         run: |
-          echo '=== Build log tail ==='
-          tail -n 200 /tmp/network-core-v2-build.log 2>/dev/null || true
+          echo '=== Simulator log tail ==='
+          tail -n 180 /tmp/network-core-v2-simulator.log 2>/dev/null || true
+          echo '=== Device log tail ==='
+          tail -n 180 /tmp/network-core-v2-device.log 2>/dev/null || true
