@@ -288,7 +288,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         monitor.start(queue: pathQueue)
     }
 
-    private func handlePath(_ path: NWPath, generation: UInt64) {
+    private func handlePath(_ path: Network.NWPath, generation: UInt64) {
         guard isCurrent(generation) else { return }
 
         pathDebounceWorkItem?.cancel()
