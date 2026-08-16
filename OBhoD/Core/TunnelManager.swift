@@ -33,6 +33,7 @@ final class TunnelManager: ObservableObject {
     @Published var connectedSince: Date? = nil
 
     private var isDisconnecting = false
+    private var connectionGeneration: UInt64 = 0
 
     // MARK: NetworkExtension
 
@@ -54,7 +55,16 @@ final class TunnelManager: ObservableObject {
     // MARK: Connect / Disconnect
 
     func connect(profile: ConnectionProfile) {
-        guard !isConnecting, !isRunning, !isDisconnecting else { return }
+        // The same visible button acts as Cancel while a staged bootstrap is in
+        // progress. Older builds silently ignored this tap for up to ~75 seconds.
+        if isConnecting {
+            disconnect()
+            return
+        }
+        guard !isRunning, !isDisconnecting else { return }
+
+        connectionGeneration &+= 1
+        let requestGeneration = connectionGeneration
 
         isConnecting = true
         stats = "Подключение…"
@@ -69,13 +79,16 @@ final class TunnelManager: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            await self.startVPNInterface(profile: profile)
+            await self.startVPNInterface(profile: profile, generation: requestGeneration)
         }
     }
 
     func disconnect() {
         guard !isDisconnecting else { return }
 
+        // Invalidate any delayed save/load/settle continuation so an old CONNECT
+        // cannot call startVPNTunnel after the user has already cancelled it.
+        connectionGeneration &+= 1
         isDisconnecting = true
         isConnecting = false
         stats = "Отключение…"
@@ -84,7 +97,13 @@ final class TunnelManager: ObservableObject {
             resetDisconnectedState()
             return
         }
-        manager.connection.stopVPNTunnel()
+
+        switch manager.connection.status {
+        case .disconnected, .invalid:
+            resetDisconnectedState()
+        default:
+            manager.connection.stopVPNTunnel()
+        }
     }
 
     func clearUnreadErrors() {
@@ -119,11 +138,12 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    private func startVPNInterface(profile: ConnectionProfile) async {
+    private func startVPNInterface(profile: ConnectionProfile, generation: UInt64) async {
         if vpnManager == nil {
             await loadVPNManager()
         }
 
+        guard isCurrentConnectionGeneration(generation), isConnecting else { return }
         guard let manager = vpnManager else {
             isConnecting = false
             appendLog("VPN Manager недоступен", isError: true)
@@ -141,24 +161,37 @@ final class TunnelManager: ObservableObject {
 
         do {
             try await manager.saveToPreferences()
+            guard isCurrentConnectionGeneration(generation), isConnecting else { return }
+
             // Always reload the object after saving. NetworkExtension preferences
             // are asynchronous and using a stale manager here is a common source
             // of preparing/connecting races on real devices.
             try await manager.loadFromPreferences()
+            guard isCurrentConnectionGeneration(generation), isConnecting else { return }
 
             // Give NECP/preferences a short settling window before asking iOS to
             // launch the extension. This is intentionally modest because we do
             // not enable includeAllNetworks in this version.
             try await Task.sleep(nanoseconds: 500_000_000)
+            guard isCurrentConnectionGeneration(generation), isConnecting else { return }
 
             try manager.connection.startVPNTunnel()
             appendLog("Запуск Network Extension…", isError: false)
             applyVPNStatus()
+        } catch is CancellationError {
+            if isCurrentConnectionGeneration(generation) {
+                resetDisconnectedState()
+            }
         } catch {
+            guard isCurrentConnectionGeneration(generation) else { return }
             isConnecting = false
             isRunning = false
             appendLog("Ошибка запуска VPN: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    private func isCurrentConnectionGeneration(_ value: UInt64) -> Bool {
+        connectionGeneration == value
     }
 
     // MARK: Status source of truth
