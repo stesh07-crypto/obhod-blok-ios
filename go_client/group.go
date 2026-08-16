@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-
 const workersPerGroup = 9
 
 // WorkerGroup:
@@ -144,6 +143,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
 
 				quotaRetry := false
+				transientSocketRetry := false
 				if getConf {
 					if configDelivered {
 						atomic.StoreInt32(configSent, 1)
@@ -163,7 +163,13 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						strings.Contains(errStrLower, "attribute not found")
 					isTurnQuota := strings.Contains(errStrLower, "quota") || strings.Contains(errStr, "486")
 					quotaRetry = isTurnQuota
-					turnCredRefreshNeeded := !isTurnQuota && (turnAllocAttrMissing ||
+					transientSocketRetry = strings.Contains(errStrLower, "cannot create socket") ||
+						strings.Contains(errStrLower, "network is unreachable") ||
+						strings.Contains(errStrLower, "no route to host") ||
+						strings.Contains(errStrLower, "network changed") ||
+						strings.Contains(errStrLower, "operation not permitted")
+
+					turnCredRefreshNeeded := !isTurnQuota && !transientSocketRetry && (turnAllocAttrMissing ||
 						strings.Contains(errStrLower, "turn allocate auth") ||
 						strings.Contains(errStrLower, "invalid credential") ||
 						strings.Contains(errStrLower, "stale nonce") ||
@@ -186,24 +192,30 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					}
 
 					attempt++
-					if isTurnQuota {
+					switch {
+					case transientSocketRetry:
+						// On iOS Wi-Fi/cellular handoff may invalidate only the local
+						// socket. TURN credentials remain valid, so keep them and retry
+						// quickly instead of killing this worker or hitting auth again.
+						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повторяем с теми же TURN-кредами (попытка %d): %s", wid, attempt, errStr)
+					case isTurnQuota:
 						log.Printf("[ВОРКЕР #%d] [TURN] Квота relay исчерпана (один аккаунт VK = мало слотов), ждём: %s", wid, errStr)
-					} else if turnAllocAttrMissing {
+					case turnAllocAttrMissing:
 						log.Printf("[ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
 						refreshCreds("TURN Allocate attribute-not-found")
-					} else if turnCredRefreshNeeded {
+					case turnCredRefreshNeeded:
 						log.Printf("[ВОРКЕР #%d] [TURN] Ошибка allocation/кредов, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
 						refreshCreds("TURN allocation error")
-					} else {
+					default:
 						log.Printf("[ВОРКЕР #%d] Ошибка (попытка %d): %s", wid, attempt, errStr)
 					}
 
-					// Если ошибка STUN (credentials invalid), воркер не сможет переподключиться. Завершаем.
-					isStunDeath := strings.Contains(errStrLower, "error 29") ||
-						strings.Contains(errStrLower, "cannot create socket")
-
-					if isStunDeath {
-						log.Printf("[ВОРКЕР #%d] Невосстановимая TURN/STUN ошибка, завершение: %s", wid, errStr)
+					// Authentication/flood-control failures may require user/hash
+					// intervention. A local socket failure is deliberately NOT in
+					// this category because mobile interface changes are recoverable.
+					isUnrecoverableRemoteFailure := strings.Contains(errStrLower, "error 29")
+					if isUnrecoverableRemoteFailure {
+						log.Printf("[ВОРКЕР #%d] Невосстановимая удалённая ошибка, завершение: %s", wid, errStr)
 						return
 					}
 				}
@@ -213,7 +225,9 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				}
 
 				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
-				if quotaRetry {
+				if transientSocketRetry {
+					retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
+				} else if quotaRetry {
 					retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
 				}
 				select {
@@ -269,10 +283,10 @@ func normalizeVKJoinHash(input string) string {
 
 // TurnParams — конфигурация TURN
 type TurnParams struct {
-	Host    string
-	Port    string
-	Hashes  []string
-	WrapKey []byte // Password-derived WRAP key (32 bytes), nil = disabled
+	Host     string
+	Port     string
+	Hashes   []string
+	WrapKey  []byte // Password-derived WRAP key (32 bytes), nil = disabled
 	ObfsMode string // "audio" or "video" — RTP masking mode
 }
 
@@ -283,5 +297,3 @@ type Credentials struct {
 	TurnURLs      []string
 	CacheStreamID int
 }
-
-
