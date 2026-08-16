@@ -24,13 +24,14 @@ struct ProfilesView: View {
                     .padding(.horizontal)
                     .padding(.top, 8)
 
-                    // ── 2. Live Stats Grid ─────────────────────────────────────
+                    // ── 2. Real live stats from TunnelExtension / Go ───────────
                     LiveStatsGrid(
                         isRunning: tunnelManager.isRunning,
+                        isConnecting: tunnelManager.isConnecting,
                         uptime: tunnelManager.uptimeString,
-                        trafficMb: profilesStore.currentProfile?.trafficMb ?? 0,
-                        workers: profilesStore.currentProfile?.workersPerHash ?? 16,
-                        profileName: profilesStore.currentProfile?.name ?? "OBhoD"
+                        activeConnections: tunnelManager.activeConnections,
+                        downloaded: tunnelManager.downloadedMBString,
+                        uploaded: tunnelManager.uploadedMBString
                     )
                     .padding(.horizontal)
 
@@ -183,18 +184,15 @@ private struct NeonConnectHeroCard: View {
     @State private var isPulsing = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            // Neon Button
+        VStack(spacing: 12) {
             Button(action: onToggle) {
                 ZStack {
-                    // Outer glow ring
                     Circle()
                         .stroke(ringColor.opacity(0.3), lineWidth: 10)
                         .frame(width: 140, height: 140)
                         .scaleEffect(isConnecting ? (isPulsing ? 1.15 : 0.95) : 1.0)
                         .animation(isConnecting ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: isPulsing)
 
-                    // Inner glowing circle
                     Circle()
                         .fill(
                             LinearGradient(
@@ -210,7 +208,6 @@ private struct NeonConnectHeroCard: View {
                         .frame(width: 110, height: 110)
                         .shadow(color: ringColor.opacity(0.6), radius: isRunning ? 16 : 8, x: 0, y: 0)
 
-                    // Icon & text
                     VStack(spacing: 4) {
                         Image(systemName: isRunning ? "shield.checkmark.fill" : (isConnecting ? "arrow.triangle.2.circlepath" : "power"))
                             .font(.system(size: 34, weight: .bold))
@@ -227,20 +224,11 @@ private struct NeonConnectHeroCard: View {
             .buttonStyle(.plain)
             .onAppear { isPulsing = true }
 
-            // Active Profile Info
-            VStack(spacing: 3) {
-                Text(currentProfile?.name ?? "Нет выбранного сервера")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.primary)
-
-
-
-                if let expBadge = currentProfile?.expirationBadge {
-                    Text(expBadge)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(currentProfile?.isExpired == true ? .red : .secondary)
-                        .padding(.top, 2)
-                }
+            // Profile name intentionally removed from under the connect button.
+            if let expBadge = currentProfile?.expirationBadge {
+                Text(expBadge)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(currentProfile?.isExpired == true ? .red : .secondary)
             }
         }
         .frame(maxWidth: .infinity)
@@ -269,10 +257,11 @@ private struct NeonConnectHeroCard: View {
 
 private struct LiveStatsGrid: View {
     let isRunning: Bool
+    let isConnecting: Bool
     let uptime: String
-    let trafficMb: Double
-    let workers: Int
-    let profileName: String
+    let activeConnections: Int
+    let downloaded: String
+    let uploaded: String
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
@@ -283,22 +272,22 @@ private struct LiveStatsGrid: View {
                 color: .blue
             )
             StatCard(
-                icon: "arrow.up.arrow.down",
-                title: "Трафик",
-                value: String(format: "%.1f МБ", trafficMb),
+                icon: "point.3.connected.trianglepath.dotted",
+                title: "Активных",
+                value: "\(activeConnections)",
+                color: activeConnections > 0 ? .green : (isConnecting ? .orange : .purple)
+            )
+            StatCard(
+                icon: "arrow.down.circle.fill",
+                title: "Скачано",
+                value: downloaded,
                 color: .teal
             )
             StatCard(
-                icon: "cpu",
-                title: "Потоков",
-                value: "\(workers)",
-                color: .purple
-            )
-            StatCard(
-                icon: "network",
-                title: "Статус",
-                value: isRunning ? "Защищен" : "Выключен",
-                color: isRunning ? .green : .gray
+                icon: "arrow.up.circle.fill",
+                title: "Загружено",
+                value: uploaded,
+                color: .indigo
             )
         }
     }
@@ -350,7 +339,6 @@ private struct ProfileCardView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Quick action button
             Button(action: onSelect) {
                 ZStack {
                     Circle()
@@ -364,7 +352,6 @@ private struct ProfileCardView: View {
             }
             .buttonStyle(.plain)
 
-            // Info
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(profile.name)
@@ -381,7 +368,6 @@ private struct ProfileCardView: View {
                             .clipShape(Capsule())
                     }
                 }
-
 
                 HStack(spacing: 8) {
                     Text(profile.expirationBadge)
@@ -400,7 +386,6 @@ private struct ProfileCardView: View {
 
             Spacer()
 
-            // Menu actions
             Menu {
                 Button(action: onEdit) {
                     Label("Редактировать", systemImage: "pencil")
