@@ -13,6 +13,7 @@ enum AppGroup {
         static let transportRecovering  = "transport_recovering"
         static let physicalNetworkLabel = "physical_network_label"
         static let lastPingMilliseconds = "last_ping_milliseconds"
+        static let connectedSinceUnix   = "connected_since_unix"
         static let lastStats            = "last_stats"
         static let lastLogLines         = "last_log_lines"
         static let startRequested       = "start_requested"
