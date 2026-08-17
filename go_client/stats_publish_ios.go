@@ -48,6 +48,7 @@ func publishStats(s *Stats) {
 		iosStats(string(data))
 	}
 
+	maybeLogIOSMemoryDiagnostics(s)
 	watchActiveConnections(active)
 }
 
