@@ -65,6 +65,13 @@ struct OBhoDApp: App {
         let sharedTunnelRunning = defaults.bool(forKey: AppGroup.Keys.tunnelRunning)
         connectionHealth.setTunnelActive(tunnelManager.isRunning || tunnelManager.isConnecting)
 
+        // A fresh app-driven connect clears the previous session timestamp.
+        // Cold-launch recovery of an already-running extension is excluded because
+        // PacketTunnelProvider keeps tunnelRunning=true in that case.
+        if tunnelManager.isConnecting && !sharedTunnelRunning {
+            defaults.removeObject(forKey: AppGroup.Keys.connectedSinceUnix)
+        }
+
         if tunnelManager.isRunning, let currentSince = tunnelManager.connectedSince {
             let storedTimestamp = defaults.double(forKey: AppGroup.Keys.connectedSinceUnix)
             if storedTimestamp > 0 {
