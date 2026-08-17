@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LogsView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
+    @ObservedObject private var connectionHealth = ConnectionHealthMonitor.shared
     @State private var showOnlyErrors = false
 
     var filteredLogs: [LogEntry] {
@@ -94,25 +95,57 @@ struct LogsView: View {
                 }
             }
         }
-        .onAppear { tunnelManager.clearUnreadErrors() }
+        .onAppear {
+            tunnelManager.clearUnreadErrors()
+            syncHealthActivity()
+        }
+        .onChange(of: tunnelManager.isRunning) { _ in
+            syncHealthActivity()
+        }
+        .onChange(of: tunnelManager.isConnecting) { _ in
+            syncHealthActivity()
+        }
+    }
+
+    private func syncHealthActivity() {
+        connectionHealth.setTunnelActive(tunnelManager.isRunning || tunnelManager.isConnecting)
     }
 
     private var liveStatsHeader: some View {
-        HStack(spacing: 12) {
-            Label("\(tunnelManager.activeConnections)", systemImage: "point.3.connected.trianglepath.dotted")
-                .foregroundColor(tunnelManager.activeConnections > 0 ? .green : .secondary)
-
-            Spacer()
-
-            Text("↓ \(tunnelManager.downloadedMBString)")
-                .foregroundColor(.teal)
-
-            Text("↑ \(tunnelManager.uploadedMBString)")
-                .foregroundColor(.indigo)
+        HStack(spacing: 0) {
+            LiveHeaderMetric(title: "Активных", value: "\(tunnelManager.activeConnections)")
+            Divider().frame(height: 28)
+            LiveHeaderMetric(
+                title: "Ping",
+                value: (tunnelManager.isRunning || tunnelManager.isConnecting) ? connectionHealth.pingText : "—"
+            )
+            Divider().frame(height: 28)
+            LiveHeaderMetric(title: "↑", value: tunnelManager.uploadedMBString)
+            Divider().frame(height: 28)
+            LiveHeaderMetric(title: "Сессия", value: tunnelManager.isRunning ? tunnelManager.uptimeString : "00:00")
         }
-        .font(.system(size: 12, weight: .semibold, design: .rounded))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
         .background(Color(UIColor.secondarySystemGroupedBackground))
+    }
+}
+
+private struct LiveHeaderMetric: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

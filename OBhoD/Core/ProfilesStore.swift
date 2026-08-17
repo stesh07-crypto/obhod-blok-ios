@@ -148,6 +148,56 @@ final class ProfilesStore: ObservableObject {
         }
     }
 
+    /// Full bot/deep-link import path. This does not depend on SwiftUI being
+    /// mounted, so a cold launch cannot lose the URL before onReceive exists.
+    /// Existing profiles are updated in place instead of duplicated.
+    @discardableResult
+    func importSubscription(from url: URL) async throws -> Int {
+        let parsed = try await SubscriptionImport.fetch(url: url)
+        let groupName = parsed.subscriptionName ?? "OBhoD"
+        let sourceURL = url.absoluteString
+
+        var mergedProfiles = profiles
+        var importedIDs: [String] = []
+
+        for var incoming in parsed.profiles {
+            if incoming.name.isEmpty ||
+                incoming.name == "Imported" ||
+                incoming.name.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-", options: .regularExpression) != nil {
+                incoming.name = groupName
+            }
+            incoming.subscriptionUrl = sourceURL
+
+            if let existingIndex = mergedProfiles.firstIndex(where: { existing in
+                existing.peer == incoming.peer ||
+                    (!incoming.name.isEmpty &&
+                     existing.name == incoming.name &&
+                     existing.subscriptionUrl == sourceURL)
+            }) {
+                let existing = mergedProfiles[existingIndex]
+                incoming.id = existing.id
+                incoming.trafficMb = max(existing.trafficMb, incoming.trafficMb)
+                incoming.pingMs = existing.pingMs
+                mergedProfiles[existingIndex] = incoming
+                importedIDs.append(existing.id)
+            } else {
+                mergedProfiles.append(incoming)
+                importedIDs.append(incoming.id)
+            }
+        }
+
+        profiles = mergedProfiles
+        saveSubscriptionURL(sourceURL)
+
+        if let firstID = importedIDs.first {
+            currentProfileId = firstID
+            defaults.set(firstID, forKey: currentKey)
+        }
+
+        save()
+        return importedIDs.count
+    }
+
     // MARK: – Refresh Subscriptions
 
     func refreshSubscriptions() async -> (refreshed: Int, failed: Int) {

@@ -38,6 +38,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let startGeneration = beginStart(completionHandler: completionHandler)
 
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+        defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
         defaults?.set("Подготовка транспорта…", forKey: AppGroup.Keys.lastStats)
 
         guard
@@ -77,9 +79,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             self.defaults?.set("Подключение TURN/DTLS…", forKey: AppGroup.Keys.lastStats)
 
-            // Receiving the WG config proves that at least one TURN + DTLS path
-            // is genuinely usable. Do not route device traffic into the TUN before
-            // this point or a failed bootstrap can cut the app off from the network.
             guard GoClient.waitUntilTransportReady(timeout: 75) else {
                 self.failStart(startGeneration, error: TunnelError.transportTimeout)
                 return
@@ -118,6 +117,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.startPathMonitor(generation: startGeneration)
 
                     self.defaults?.set(true, forKey: AppGroup.Keys.tunnelRunning)
+                    self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
                     self.defaults?.set("Подключено", forKey: AppGroup.Keys.lastStats)
                     self.appendLog("[VPN] Туннель полностью готов", isError: false)
                     NSLog("[WDTT-Ext] Tunnel started successfully")
@@ -139,10 +139,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         stopPathMonitor()
         GoClient.clearPacketHandler()
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+        defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
         defaults?.set("Отключено", forKey: AppGroup.Keys.lastStats)
 
-        // Stop Go off the provider callback thread. Go itself has a bounded wait,
-        // and this second gate guarantees iOS is never left in Stopping forever.
         let gate = CompletionGate(completionHandler)
         DispatchQueue.global(qos: .userInitiated).async {
             GoClient.stop()
@@ -154,8 +154,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
-        // iOS may call sleep/wake frequently. Destroying TURN allocations here
-        // creates reconnect storms, so the runtime is intentionally preserved.
         appendLog("[VPN] sleep: соединения сохранены", isError: false)
         completionHandler()
     }
@@ -166,17 +164,46 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        completionHandler?(nil)
+        guard let command = String(data: messageData, encoding: .utf8) else {
+            completionHandler?(Data("invalid".utf8))
+            return
+        }
+
+        switch command {
+        case "reconnect":
+            let accepted = GoClient.requestTransportReconnect()
+            completionHandler?(Data((accepted ? "ok" : "busy").utf8))
+        default:
+            completionHandler?(Data("unsupported".utf8))
+        }
     }
 
     // MARK: Go callbacks
 
     private func installGoCallbacks() {
         GoClient.setLogHandler { [weak self] line, isError in
+            self?.updateTransportRecoveryState(from: line)
             self?.appendLog(line, isError: isError)
         }
         GoClient.setStatsHandler { [weak self] stats in
             self?.defaults?.set(stats, forKey: AppGroup.Keys.lastStats)
+        }
+    }
+
+    private func updateTransportRecoveryState(from line: String) {
+        if line.contains("[СЕТЬ] Перезапуск транспорта:") {
+            defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
+            return
+        }
+
+        if line.contains("[IOS-TUN] WireGuard поднят") {
+            defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+            return
+        }
+
+        if line.contains("[ГО-ВОРКЕР] Все воркеры завершены"),
+           defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true {
+            defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
         }
     }
 
@@ -225,7 +252,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             ipv4.includedRoutes = [NEIPv4Route.default()]
             settings.ipv4Settings = ipv4
         } else {
-            // Backwards-compatible fallback for older server configs.
             let ipv4 = NEIPv4Settings(addresses: ["10.77.0.2"], subnetMasks: ["255.255.255.0"])
             ipv4.includedRoutes = [NEIPv4Route.default()]
             settings.ipv4Settings = ipv4
@@ -271,6 +297,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case cellular
         case wired
         case other
+
+        var label: String {
+            switch self {
+            case .wifi: return "Wi‑Fi"
+            case .cellular: return "LTE"
+            case .wired: return "Ethernet"
+            case .other: return "Сеть"
+            }
+        }
     }
 
     private func startPathMonitor(generation: UInt64) {
@@ -295,6 +330,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         guard path.status == .satisfied else {
             pathWasUnavailable = true
+            defaults?.set("Нет сети", forKey: AppGroup.Keys.physicalNetworkLabel)
             appendLog("[СЕТЬ] Физическая сеть временно недоступна", isError: false)
             return
         }
@@ -310,9 +346,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             pathType = .other
         }
 
-        // During Wi-Fi <-> LTE handoff NWPath may temporarily report only the
-        // tunnel/other interface. Wait for a real physical path instead of
-        // rebuilding the transport against this transient state.
         guard pathType != .other else {
             pathWasUnavailable = true
             return
@@ -324,14 +357,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pathWasUnavailable = false
 
         guard needsReconnect else {
+            defaults?.set(pathType.label, forKey: AppGroup.Keys.physicalNetworkLabel)
             appendLog("[СЕТЬ] Активный интерфейс: \(pathType.rawValue)", isError: false)
             return
+        }
+
+        if let previous, previous != pathType {
+            defaults?.set("\(previous.label) → \(pathType.label)", forKey: AppGroup.Keys.physicalNetworkLabel)
+        } else {
+            defaults?.set(pathType.label, forKey: AppGroup.Keys.physicalNetworkLabel)
         }
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.isCurrent(generation) else { return }
             self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); обновляем транспорт", isError: false)
             GoClient.notifyNetworkChange()
+
+            self.pathQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self,
+                      self.isCurrent(generation),
+                      self.lastStablePath == pathType else { return }
+                self.defaults?.set(pathType.label, forKey: AppGroup.Keys.physicalNetworkLabel)
+            }
         }
         pathDebounceWorkItem = item
         pathQueue.asyncAfter(deadline: .now() + 1.5, execute: item)
@@ -378,6 +425,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func failStart(_ generation: UInt64, error: Error) {
         guard isCurrent(generation) else { return }
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+        defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
         defaults?.set("Ошибка подключения", forKey: AppGroup.Keys.lastStats)
         appendLog("[VPN] \(error.localizedDescription)", isError: true)
         GoClient.clearPacketHandler()

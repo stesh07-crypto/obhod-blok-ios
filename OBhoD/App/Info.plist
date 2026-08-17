@@ -22,6 +22,8 @@
     <string>130</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
     <!-- URL Schemes: qwdtt:// -->
     <key>CFBundleURLTypes</key>
     <array>
