@@ -38,6 +38,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let startGeneration = beginStart(completionHandler: completionHandler)
 
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
         defaults?.set("Подготовка транспорта…", forKey: AppGroup.Keys.lastStats)
 
         guard
@@ -118,6 +119,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.startPathMonitor(generation: startGeneration)
 
                     self.defaults?.set(true, forKey: AppGroup.Keys.tunnelRunning)
+                    self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
                     self.defaults?.set("Подключено", forKey: AppGroup.Keys.lastStats)
                     self.appendLog("[VPN] Туннель полностью готов", isError: false)
                     NSLog("[WDTT-Ext] Tunnel started successfully")
@@ -139,6 +141,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         stopPathMonitor()
         GoClient.clearPacketHandler()
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
         defaults?.set("Отключено", forKey: AppGroup.Keys.lastStats)
 
         // Stop Go off the provider callback thread. Go itself has a bounded wait,
@@ -166,17 +169,52 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        completionHandler?(nil)
+        guard let command = String(data: messageData, encoding: .utf8) else {
+            completionHandler?(Data("invalid".utf8))
+            return
+        }
+
+        switch command {
+        case "reconnect":
+            let accepted = GoClient.requestTransportReconnect()
+            completionHandler?(Data((accepted ? "ok" : "busy").utf8))
+        default:
+            completionHandler?(Data("unsupported".utf8))
+        }
     }
 
     // MARK: Go callbacks
 
     private func installGoCallbacks() {
         GoClient.setLogHandler { [weak self] line, isError in
+            self?.updateTransportRecoveryState(from: line)
             self?.appendLog(line, isError: isError)
         }
         GoClient.setStatsHandler { [weak self] stats in
             self?.defaults?.set(stats, forKey: AppGroup.Keys.lastStats)
+        }
+    }
+
+    /// Go emits the reconnect line only after requestReconnect actually accepts
+    /// the repair and cancels the current transport attempt. Recovery ends only
+    /// after a new userspace WireGuard instance is up again.
+    private func updateTransportRecoveryState(from line: String) {
+        if line.contains("[СЕТЬ] Перезапуск транспорта:") {
+            defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
+            return
+        }
+
+        if line.contains("[IOS-TUN] WireGuard поднят") {
+            defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+            return
+        }
+
+        // If every worker exits without an explicit watchdog/path request,
+        // runTunnelLoop still starts a fresh transport attempt. Mark that real
+        // retry too, but never during an intentional stopTunnel.
+        if line.contains("[ГО-ВОРКЕР] Все воркеры завершены"),
+           defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true {
+            defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
         }
     }
 
@@ -378,6 +416,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func failStart(_ generation: UInt64, error: Error) {
         guard isCurrent(generation) else { return }
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
         defaults?.set("Ошибка подключения", forKey: AppGroup.Keys.lastStats)
         appendLog("[VPN] \(error.localizedDescription)", isError: true)
         GoClient.clearPacketHandler()
