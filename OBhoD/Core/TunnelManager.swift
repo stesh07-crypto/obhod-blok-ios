@@ -46,6 +46,7 @@ final class TunnelManager: ObservableObject {
 
     @Published var isRunning = false
     @Published var isConnecting = false
+    @Published var isTransportRecovering = false
     @Published var stats = "Ожидание данных..."
     @Published var logs: [LogEntry] = []
     @Published var unreadErrors = 0
@@ -101,6 +102,7 @@ final class TunnelManager: ObservableObject {
         let requestGeneration = connectionGeneration
 
         isConnecting = true
+        isTransportRecovering = false
         stats = isAutoReconnectLaunching ? "Переподключение…" : "Подключение…"
 
         if !isAutoReconnectLaunching {
@@ -113,6 +115,7 @@ final class TunnelManager: ObservableObject {
         defaults.removeObject(forKey: AppGroup.Keys.lastLogLines)
         defaults.removeObject(forKey: AppGroup.Keys.lastStats)
         defaults.set(false, forKey: AppGroup.Keys.tunnelRunning)
+        defaults.set(false, forKey: AppGroup.Keys.transportRecovering)
         syncSettingsToAppGroup(profile: profile)
 
         Task { [weak self] in
@@ -132,6 +135,7 @@ final class TunnelManager: ObservableObject {
         connectionGeneration &+= 1
         isDisconnecting = true
         isConnecting = false
+        isTransportRecovering = false
         stats = "Отключение…"
 
         guard let manager = vpnManager else {
@@ -144,6 +148,36 @@ final class TunnelManager: ObservableObject {
             resetDisconnectedState()
         default:
             manager.connection.stopVPNTunnel()
+        }
+    }
+
+    /// Ask the living NetworkExtension to rebuild only its Go/TURN transport.
+    /// This deliberately does not call stopVPNTunnel/startVPNTunnel and therefore
+    /// keeps the iOS VPN session and packet-tunnel configuration alive.
+    func reconnectTransport() {
+        guard isRunning, !isDisconnecting else { return }
+        guard let session = vpnManager?.connection as? NETunnelProviderSession else {
+            appendLog("[СЕТЬ] NetworkExtension недоступен для мягкого переподключения", isError: true)
+            return
+        }
+
+        do {
+            try session.sendProviderMessage(Data("reconnect".utf8)) { [weak self] responseData in
+                let response = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch response {
+                    case "ok":
+                        self.appendLog("[СЕТЬ] Ручное переподключение транспорта запущено", isError: false)
+                    case "busy":
+                        self.appendLog("[СЕТЬ] Транспорт уже восстанавливается; повторная команда не нужна", isError: false)
+                    default:
+                        self.appendLog("[СЕТЬ] Extension не подтвердил переподключение", isError: true)
+                    }
+                }
+            }
+        } catch {
+            appendLog("[СЕТЬ] Не удалось отправить команду переподключения: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -270,12 +304,14 @@ final class TunnelManager: ObservableObject {
             isRunning = false
             isConnecting = true
             isDisconnecting = false
+            isTransportRecovering = true
             stats = "Переподключение…"
 
         case .disconnecting:
             isRunning = false
             isConnecting = false
             isDisconnecting = true
+            isTransportRecovering = false
             stats = "Отключение…"
 
         case .disconnected, .invalid:
@@ -341,6 +377,7 @@ final class TunnelManager: ObservableObject {
         activeConnections = 0
         uploadedBytes = 0
         downloadedBytes = 0
+        isTransportRecovering = false
     }
 
     // MARK: Extension logs / stats
@@ -356,6 +393,15 @@ final class TunnelManager: ObservableObject {
     }
 
     private func syncExtensionState() {
+        if isRunning || isConnecting {
+            let recovering = defaults.bool(forKey: AppGroup.Keys.transportRecovering)
+            if isTransportRecovering != recovering {
+                isTransportRecovering = recovering
+            }
+        } else if isTransportRecovering {
+            isTransportRecovering = false
+        }
+
         if let extensionStats = defaults.string(forKey: AppGroup.Keys.lastStats),
            !extensionStats.isEmpty,
            (isRunning || isConnecting) {
