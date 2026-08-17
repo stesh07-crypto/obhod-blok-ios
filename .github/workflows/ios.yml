@@ -63,6 +63,7 @@ jobs:
           echo "Setting CFBundleVersion to ${{ github.run_number }}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "OBhoD/App/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "TunnelExtension/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "LiveActivityExtension/Info.plist" || true
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -160,6 +161,7 @@ jobs:
         env:
           APP_B64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
           EXT_B64: ${{ secrets.IOS_EXT_PROVISIONING_PROFILE_BASE64 }}
+          LIVE_B64: ${{ secrets.IOS_LIVE_ACTIVITY_PROVISIONING_PROFILE_BASE64 }}
         run: |
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
@@ -177,7 +179,7 @@ jobs:
             "
           fi
 
-          # 2. Extension Profile (from repository or fallback to secret)
+          # 2. Tunnel Extension Profile (from repository or fallback to secret)
           if [ -f "provisioning/OBhod_ext.mobileprovision" ]; then
             cp -f "provisioning/OBhod_ext.mobileprovision" "$PP_DIR/ext_raw.mobileprovision"
             echo "Used provisioning/OBhod_ext.mobileprovision from repository"
@@ -190,9 +192,26 @@ jobs:
             "
           fi
 
-          # 3. Copy by UUID (required by Xcode codesign)
+          # 3. Live Activity Extension Profile (new bundle id)
+          if [ -f "provisioning/OBhod_live.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_live.mobileprovision" "$PP_DIR/live_raw.mobileprovision"
+            echo "Used provisioning/OBhod_live.mobileprovision from repository"
+          elif [ -n "$LIVE_B64" ]; then
+            python3 -c "
+            import base64, os, re
+            raw = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('LIVE_B64', ''))
+            if len(raw) % 4 != 0: raw += '=' * (4 - len(raw) % 4)
+            open('$PP_DIR/live_raw.mobileprovision', 'wb').write(base64.b64decode(raw))
+            "
+          else
+            echo "::error ::Нужен provisioning profile OBhod_live для net.qwdtt.client.ios.liveactivity: добавьте provisioning/OBhod_live.mobileprovision или secret IOS_LIVE_ACTIVITY_PROVISIONING_PROFILE_BASE64"
+            exit 1
+          fi
+
+          # 4. Copy by UUID (required by Xcode codesign)
           APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          LIVE_UUID=$(security cms -D -i "$PP_DIR/live_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
           if [ -n "$APP_UUID" ]; then
             cp -f "$PP_DIR/app_raw.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"
@@ -200,16 +219,24 @@ jobs:
           fi
           if [ -n "$EXT_UUID" ]; then
             cp -f "$PP_DIR/ext_raw.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"
-            echo "Installed Ext profile UUID: $EXT_UUID"
+            echo "Installed Tunnel profile UUID: $EXT_UUID"
+          fi
+          if [ -n "$LIVE_UUID" ]; then
+            cp -f "$PP_DIR/live_raw.mobileprovision" "$PP_DIR/${LIVE_UUID}.mobileprovision"
+            echo "Installed Live Activity profile UUID: $LIVE_UUID"
           fi
 
           echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
           security cms -D -i "$PP_DIR/app_raw.mobileprovision" > /tmp/app.plist 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/app.plist 2>/dev/null || true
 
-          echo "=== EXT PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
+          echo "=== TUNNEL PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
           security cms -D -i "$PP_DIR/ext_raw.mobileprovision" > /tmp/ext.plist 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/ext.plist 2>/dev/null || true
+
+          echo "=== LIVE ACTIVITY PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
+          security cms -D -i "$PP_DIR/live_raw.mobileprovision" > /tmp/live.plist 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" /tmp/live.plist 2>/dev/null || true
 
       - name: Build archive
         run: |
@@ -234,15 +261,19 @@ jobs:
           echo "=== RE-SIGNING ARCHIVE WITH EXPLICIT ENTITLEMENTS ==="
           APP_DIR="$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app"
           EXT_DIR="$APP_DIR/PlugIns/TunnelExtension.appex"
+          LIVE_DIR="$APP_DIR/PlugIns/OBhoDLiveActivity.appex"
 
-          # 1. Sign Extension with TunnelExtension.entitlements
+          # 1. Sign Tunnel Extension with explicit NetworkExtension/App Group entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "TunnelExtension/TunnelExtension.entitlements" \
             --generate-entitlement-der \
             --keychain "$RUNNER_TEMP/signing.keychain-db" \
             "$EXT_DIR"
 
-          # 2. Sign Main App with OBhoD.entitlements
+          # Live Activity has no custom entitlements; keep Xcode's profile-backed signature intact.
+          codesign --verify --strict "$LIVE_DIR"
+
+          # 2. Sign Main App with OBhoD.entitlements after child extensions are final
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "OBhoD/App/OBhoD.entitlements" \
             --generate-entitlement-der \
@@ -251,8 +282,10 @@ jobs:
 
           echo "=== ARCHIVED APP ENTITLEMENTS VERIFICATION ==="
           codesign -d --entitlements :- "$APP_DIR" || true
-          echo "=== ARCHIVED EXTENSION ENTITLEMENTS VERIFICATION ==="
+          echo "=== ARCHIVED TUNNEL EXTENSION ENTITLEMENTS VERIFICATION ==="
           codesign -d --entitlements :- "$EXT_DIR" || true
+          echo "=== ARCHIVED LIVE ACTIVITY SIGNATURE VERIFICATION ==="
+          codesign -d --entitlements :- "$LIVE_DIR" || true
 
       - name: Export IPA
         run: |
