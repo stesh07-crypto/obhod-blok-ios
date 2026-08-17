@@ -9,7 +9,7 @@ on:
       upload_testflight:
         description: 'Upload to TestFlight (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
 
 env:
   IOS_DEPLOYMENT_TARGET: '15.0'
@@ -291,7 +291,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to TestFlight
-        if: ${{ github.event.inputs.upload_testflight != 'false' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upload_testflight == 'true' }}
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
@@ -299,7 +299,6 @@ jobs:
           IPA_PATH: ${{ env.IPA_PATH }}
         run: |
           python3 scripts/upload_testflight.py
-
 
       - name: Cleanup keychain
         if: always()
