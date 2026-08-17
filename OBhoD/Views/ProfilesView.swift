@@ -19,9 +19,11 @@ struct ProfilesView: View {
                     NeonConnectHeroCard(
                         isRunning: tunnelManager.isRunning,
                         isConnecting: tunnelManager.isConnecting,
+                        isRecovering: tunnelManager.isTransportRecovering,
                         quality: connectionHealth.qualityText(
                             isRunning: tunnelManager.isRunning,
                             isConnecting: tunnelManager.isConnecting,
+                            isRecovering: tunnelManager.isTransportRecovering,
                             activeConnections: tunnelManager.activeConnections
                         ),
                         network: connectionHealth.networkLabel,
@@ -78,6 +80,7 @@ struct ProfilesView: View {
                                     isRefreshing: profilesStore.isRefreshing && isActive,
                                     onSelect: { selectProfile(profile) },
                                     onRefresh: refreshProfiles,
+                                    onReconnect: { tunnelManager.reconnectTransport() },
                                     onEdit: { editingProfile = profile },
                                     onDelete: { profilesStore.remove(id: profile.id) }
                                 )
@@ -192,11 +195,14 @@ struct ProfilesView: View {
 private struct NeonConnectHeroCard: View {
     let isRunning: Bool
     let isConnecting: Bool
+    let isRecovering: Bool
     let quality: String
     let network: String
     let onToggle: () -> Void
 
     @State private var isPulsing = false
+
+    private var isBusy: Bool { isConnecting || isRecovering }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -205,17 +211,19 @@ private struct NeonConnectHeroCard: View {
                     Circle()
                         .stroke(ringColor.opacity(0.3), lineWidth: 10)
                         .frame(width: 140, height: 140)
-                        .scaleEffect(isConnecting ? (isPulsing ? 1.15 : 0.95) : 1.0)
-                        .animation(isConnecting ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: isPulsing)
+                        .scaleEffect(isBusy ? (isPulsing ? 1.15 : 0.95) : 1.0)
+                        .animation(isBusy ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: isPulsing)
 
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: isRunning
-                                    ? [Color.green.opacity(0.85), Color.mint]
-                                    : (isConnecting
-                                        ? [Color.orange.opacity(0.85), Color.yellow]
-                                        : [Color.orange, Color.red.opacity(0.85)]),
+                                colors: isRecovering
+                                    ? [Color.orange.opacity(0.85), Color.yellow]
+                                    : (isRunning
+                                        ? [Color.green.opacity(0.85), Color.mint]
+                                        : (isConnecting
+                                            ? [Color.orange.opacity(0.85), Color.yellow]
+                                            : [Color.orange, Color.red.opacity(0.85)])),
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -224,15 +232,17 @@ private struct NeonConnectHeroCard: View {
                         .shadow(color: ringColor.opacity(0.6), radius: isRunning ? 16 : 8, x: 0, y: 0)
 
                     VStack(spacing: 4) {
-                        Image(systemName: isRunning ? "shield.checkmark.fill" : (isConnecting ? "arrow.triangle.2.circlepath" : "power"))
+                        Image(systemName: isBusy ? "arrow.triangle.2.circlepath" : (isRunning ? "shield.checkmark.fill" : "power"))
                             .font(.system(size: 34, weight: .bold))
                             .foregroundColor(.white)
-                            .rotationEffect(isConnecting ? .degrees(isPulsing ? 360 : 0) : .degrees(0))
-                            .animation(isConnecting ? .linear(duration: 1.5).repeatForever(autoreverses: false) : .default, value: isPulsing)
+                            .rotationEffect(isBusy ? .degrees(isPulsing ? 360 : 0) : .degrees(0))
+                            .animation(isBusy ? .linear(duration: 1.5).repeatForever(autoreverses: false) : .default, value: isPulsing)
 
                         Text(statusLabel)
                             .font(.system(size: 12, weight: .bold))
                             .foregroundColor(.white.opacity(0.95))
+                            .minimumScaleFactor(0.7)
+                            .lineLimit(1)
                     }
                 }
             }
@@ -260,6 +270,7 @@ private struct NeonConnectHeroCard: View {
     }
 
     private var ringColor: Color {
+        if isRecovering { return .orange }
         if isRunning { return .green }
         if isConnecting { return .orange }
         return .orange.opacity(0.6)
@@ -275,6 +286,7 @@ private struct NeonConnectHeroCard: View {
     }
 
     private var statusLabel: String {
+        if isRecovering { return "ПЕРЕПОДКЛЮЧЕНИЕ" }
         if isConnecting { return "ПОДКЛЮЧЕНИЕ" }
         if isRunning { return "АКТИВЕН" }
         return "ВКЛЮЧИТЬ"
@@ -364,6 +376,7 @@ private struct ProfileCardView: View {
     let isRefreshing: Bool
     let onSelect: () -> Void
     let onRefresh: () -> Void
+    let onReconnect: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -434,6 +447,12 @@ private struct ProfileCardView: View {
             }
 
             Menu {
+                if isRunning {
+                    Button(action: onReconnect) {
+                        Label("Переподключить", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Divider()
+                }
                 Button(action: onEdit) {
                     Label("Редактировать", systemImage: "pencil")
                 }
