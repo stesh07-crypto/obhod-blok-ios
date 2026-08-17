@@ -6,12 +6,34 @@ struct OBhoDApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var tunnelManager = TunnelManager.shared
     @StateObject private var profilesStore = ProfilesStore.shared
+    @StateObject private var connectionHealth = ConnectionHealthMonitor.shared
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(tunnelManager)
                 .environmentObject(profilesStore)
+                .onAppear {
+                    syncRuntimePresentation()
+                }
+                .onChange(of: tunnelManager.isRunning) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: tunnelManager.isConnecting) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: tunnelManager.activeConnections) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: tunnelManager.isTransportRecovering) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: connectionHealth.pingMilliseconds) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: connectionHealth.networkLabel) { _ in
+                    syncRuntimePresentation()
+                }
                 .onOpenURL { url in
                     Task { @MainActor in
                         DeepLinkRouter.handle(url)
@@ -24,6 +46,20 @@ struct OBhoDApp: App {
                         }
                     }
                 }
+        }
+    }
+
+    @MainActor
+    private func syncRuntimePresentation() {
+        connectionHealth.setTunnelActive(tunnelManager.isRunning || tunnelManager.isConnecting)
+
+        if #available(iOS 16.1, *) {
+            LiveActivityManager.shared.sync(
+                isRunning: tunnelManager.isRunning,
+                activeConnections: tunnelManager.activeConnections,
+                connectedSince: tunnelManager.connectedSince,
+                isRecovering: tunnelManager.isTransportRecovering
+            )
         }
     }
 }
