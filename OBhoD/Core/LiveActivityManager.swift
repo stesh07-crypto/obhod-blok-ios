@@ -21,17 +21,26 @@ final class LiveActivityManager {
         connectedSince: Date?,
         isRecovering: Bool
     ) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-
         guard isRunning, let connectedSince else {
             endIfNeeded()
             return
         }
 
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+
         let state = makeState(
             activeConnections: activeConnections,
             isRecovering: isRecovering
         )
+
+        if let activity,
+           abs(activity.attributes.connectedSince.timeIntervalSince(connectedSince)) > 2 {
+            // A stale activity from an older VPN session must never carry its
+            // old timer into the new session after an app relaunch/recovery.
+            endIfNeeded()
+            start(connectedSince: connectedSince, state: state)
+            return
+        }
 
         if activity == nil {
             start(connectedSince: connectedSince, state: state)
@@ -114,6 +123,7 @@ final class LiveActivityManager {
         guard !activities.isEmpty else {
             activity = nil
             lastState = nil
+            lastUpdateAt = Date.distantPast
             return
         }
 
