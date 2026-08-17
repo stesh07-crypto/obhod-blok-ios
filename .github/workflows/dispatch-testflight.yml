@@ -1,0 +1,30 @@
+name: OBhoD — Dispatch TestFlight Release
+
+on:
+  push:
+    branches:
+      - agent/ui-live-status
+    paths:
+      - '.github/testflight-trigger'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch iOS release workflow with TestFlight upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ios.yml/dispatches" \
+            -d '{"ref":"agent/ui-live-status","inputs":{"upload_testflight":"true"}}'
+          echo "Release workflow dispatched for agent/ui-live-status with upload_testflight=true"
