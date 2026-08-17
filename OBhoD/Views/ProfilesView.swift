@@ -15,7 +15,6 @@ struct ProfilesView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-                    // ── 1. 3D Neon Quick Connect Card ──────────────────────────
                     NeonConnectHeroCard(
                         isRunning: tunnelManager.isRunning,
                         isConnecting: tunnelManager.isConnecting,
@@ -32,7 +31,6 @@ struct ProfilesView: View {
                     .padding(.horizontal)
                     .padding(.top, 8)
 
-                    // ── 2. Real live stats from TunnelExtension / Go ───────────
                     LiveStatsGrid(
                         isRunning: tunnelManager.isRunning,
                         isConnecting: tunnelManager.isConnecting,
@@ -43,7 +41,6 @@ struct ProfilesView: View {
                     )
                     .padding(.horizontal)
 
-                    // ── 3. Header & Action Row ─────────────────────────────────
                     HStack {
                         Text("Серверы и профили")
                             .font(.system(size: 18, weight: .bold))
@@ -65,7 +62,6 @@ struct ProfilesView: View {
                     .padding(.horizontal)
                     .padding(.top, 8)
 
-                    // ── 4. Profile List ────────────────────────────────────────
                     if profilesStore.profiles.isEmpty {
                         EmptyProfilesCard(showSheet: $showSubscriptionsSheet)
                             .padding(.horizontal)
@@ -77,6 +73,7 @@ struct ProfilesView: View {
                                     profile: profile,
                                     isActive: isActive,
                                     isRunning: tunnelManager.isRunning && isActive,
+                                    isRecovering: tunnelManager.isTransportRecovering && isActive,
                                     isRefreshing: profilesStore.isRefreshing && isActive,
                                     onSelect: { selectProfile(profile) },
                                     onRefresh: refreshProfiles,
@@ -190,8 +187,6 @@ struct ProfilesView: View {
     }
 }
 
-// MARK: – 1. 3D Neon Connect Hero Card
-
 private struct NeonConnectHeroCard: View {
     let isRunning: Bool
     let isConnecting: Bool
@@ -293,8 +288,6 @@ private struct NeonConnectHeroCard: View {
     }
 }
 
-// MARK: – 2. Live Stats 2x2 Grid
-
 private struct LiveStatsGrid: View {
     let isRunning: Bool
     let isConnecting: Bool
@@ -305,30 +298,15 @@ private struct LiveStatsGrid: View {
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            StatCard(
-                icon: "timer",
-                title: "Время сессии",
-                value: isRunning ? uptime : "00:00",
-                color: .blue
-            )
+            StatCard(icon: "timer", title: "Время сессии", value: isRunning ? uptime : "00:00", color: .blue)
             StatCard(
                 icon: "point.3.connected.trianglepath.dotted",
                 title: "Активных",
                 value: "\(activeConnections)",
                 color: activeConnections > 0 ? .green : (isConnecting ? .orange : .purple)
             )
-            StatCard(
-                icon: "wave.3.right",
-                title: "Пинг",
-                value: (isRunning || isConnecting) ? ping : "—",
-                color: .teal
-            )
-            StatCard(
-                icon: "arrow.up.circle.fill",
-                title: "Загружено",
-                value: uploaded,
-                color: .indigo
-            )
+            StatCard(icon: "wave.3.right", title: "Пинг", value: (isRunning || isConnecting) ? ping : "—", color: .teal)
+            StatCard(icon: "arrow.up.circle.fill", title: "Загружено", value: uploaded, color: .indigo)
         }
     }
 }
@@ -349,9 +327,7 @@ private struct StatCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                Text(title).font(.system(size: 11)).foregroundColor(.secondary)
                 Text(value)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundColor(.primary)
@@ -367,12 +343,11 @@ private struct StatCard: View {
     }
 }
 
-// MARK: – 3. Profile Card View
-
 private struct ProfileCardView: View {
     let profile: ConnectionProfile
     let isActive: Bool
     let isRunning: Bool
+    let isRecovering: Bool
     let isRefreshing: Bool
     let onSelect: () -> Void
     let onRefresh: () -> Void
@@ -418,8 +393,7 @@ private struct ProfileCardView: View {
                         .foregroundColor(profile.isExpired ? .red : .secondary)
 
                     if profile.trafficMb > 0 {
-                        Text("•")
-                            .foregroundColor(.secondary)
+                        Text("•").foregroundColor(.secondary)
                         Text(String(format: "%.1f МБ", profile.trafficMb))
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
@@ -449,8 +423,9 @@ private struct ProfileCardView: View {
             Menu {
                 if isRunning {
                     Button(action: onReconnect) {
-                        Label("Переподключить", systemImage: "arrow.triangle.2.circlepath")
+                        Label(isRecovering ? "Переподключение…" : "Переподключить", systemImage: "arrow.triangle.2.circlepath")
                     }
+                    .disabled(isRecovering)
                     Divider()
                 }
                 Button(action: onEdit) {
@@ -478,8 +453,6 @@ private struct ProfileCardView: View {
     }
 }
 
-// MARK: – Empty State
-
 private struct EmptyProfilesCard: View {
     @Binding var showSheet: Bool
 
@@ -488,15 +461,11 @@ private struct EmptyProfilesCard: View {
             Image(systemName: "server.rack")
                 .font(.system(size: 40))
                 .foregroundColor(.orange)
-
-            Text("Список серверов пуст")
-                .font(.system(size: 16, weight: .semibold))
-
+            Text("Список серверов пуст").font(.system(size: 16, weight: .semibold))
             Text("Добавьте профиль или подписку из Telegram-бота")
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-
             Button {
                 showSheet = true
             } label: {
@@ -518,8 +487,6 @@ private struct EmptyProfilesCard: View {
         )
     }
 }
-
-// MARK: – Toast Banner
 
 private struct ToastBanner: View {
     let message: String
