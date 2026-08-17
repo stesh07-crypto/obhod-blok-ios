@@ -1,0 +1,251 @@
+name: OBhoD iOS — Build Only
+
+on:
+  push:
+    branches:
+      - build/run-150-style
+  workflow_dispatch:
+
+env:
+  IOS_DEPLOYMENT_TARGET: '15.0'
+  BUNDLE_ID: 'net.qwdtt.client.ios'
+  APP_NAME: 'OBhoD'
+  SCHEME: 'OBhoD'
+  CONFIGURATION: 'Release'
+
+jobs:
+  build-only:
+    name: Build iOS App
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go_client/go.sum
+
+      - name: Select Xcode
+        run: |
+          echo "=== Available Xcode versions ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          XCODE_PATH=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v '/Applications/Xcode.app' | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ] || [ ! -d "${XCODE_PATH}/Contents/Developer" ]; then
+            XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
+          fi
+          DEV_DIR="${XCODE_PATH}/Contents/Developer"
+          echo "Using Xcode: $XCODE_PATH"
+          sudo xcode-select -s "$DEV_DIR"
+          echo "DEVELOPER_DIR=$DEV_DIR" >> $GITHUB_ENV
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build Go xcframework
+        run: |
+          chmod +x scripts/build-ios-xcframework.sh
+          bash scripts/build-ios-xcframework.sh
+
+      - name: Set Build Number
+        run: |
+          echo "Setting CFBundleVersion to ${{ github.run_number }}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "OBhoD/App/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "TunnelExtension/Info.plist" || true
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Import signing certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE_BASE64" ]; then
+            echo "::error ::IOS_DISTRIBUTION_CERTIFICATE_BASE64 is not configured"
+            exit 1
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEY_PASS="${KEYCHAIN_PASSWORD:-buildpassword123}"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+          security create-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
+
+          curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer" -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" || true
+          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
+          security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+
+          python3 - << 'EOF'
+          import base64, os, re, subprocess
+          from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
+
+          raw_str = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('CERTIFICATE_BASE64', ''))
+          if len(raw_str) % 4 != 0:
+              raw_str += '=' * (4 - len(raw_str) % 4)
+          raw_data = base64.b64decode(raw_str)
+
+          key_pem = None
+          cert_pem = None
+          for pass_candidate in [b"", b"buildpassword123", os.environ.get('CERTIFICATE_PASSWORD', '').encode()]:
+              try:
+                  p12_obj = pkcs12.load_pkcs12(raw_data, pass_candidate)
+                  if p12_obj.key:
+                      key_pem = p12_obj.key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+                  if p12_obj.cert:
+                      cert_pem = p12_obj.cert.certificate.public_bytes(Encoding.PEM)
+                  if key_pem and cert_pem:
+                      break
+              except Exception:
+                  pass
+
+          runner_temp = os.environ.get('RUNNER_TEMP', '/tmp')
+          key_path = os.path.join(runner_temp, 'key.pem')
+          cert_path = os.path.join(runner_temp, 'cert.pem')
+          out_p12 = os.path.join(runner_temp, 'certificate_native.p12')
+
+          if key_pem and cert_pem:
+              with open(key_path, 'wb') as f:
+                  f.write(key_pem)
+              with open(cert_path, 'wb') as f:
+                  f.write(cert_pem)
+              subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', key_path, '-in', cert_path, '-out', out_p12, '-passout', 'pass:buildpassword123', '-name', 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'], check=True)
+          else:
+              with open(out_p12, 'wb') as f:
+                  f.write(raw_data)
+          EOF
+
+          security import "$RUNNER_TEMP/certificate_native.p12" \
+            -P "buildpassword123" \
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+          security import "$RUNNER_TEMP/certificate_native.p12" \
+            -P "" \
+            -A -T /usr/bin/codesign -t agg -f pkcs12 -k "$KEYCHAIN_PATH" || \
+          security import "$RUNNER_TEMP/certificate_native.p12" \
+            -A -T /usr/bin/codesign -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profiles
+        env:
+          APP_B64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
+          EXT_B64: ${{ secrets.IOS_EXT_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_DIR"
+
+          if [ -f "provisioning/OBhod_app.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_app.mobileprovision" "$PP_DIR/app_raw.mobileprovision"
+          else
+            python3 -c "
+            import base64, os, re
+            raw = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('APP_B64', ''))
+            if len(raw) % 4 != 0: raw += '=' * (4 - len(raw) % 4)
+            open('$PP_DIR/app_raw.mobileprovision', 'wb').write(base64.b64decode(raw))
+            "
+          fi
+
+          if [ -f "provisioning/OBhod_ext.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_ext.mobileprovision" "$PP_DIR/ext_raw.mobileprovision"
+          else
+            python3 -c "
+            import base64, os, re
+            raw = re.sub(r'[^A-Za-z0-9+/=]', '', os.environ.get('EXT_B64', ''))
+            if len(raw) % 4 != 0: raw += '=' * (4 - len(raw) % 4)
+            open('$PP_DIR/ext_raw.mobileprovision', 'wb').write(base64.b64decode(raw))
+            "
+          fi
+
+          APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+
+          if [ -n "$APP_UUID" ]; then
+            cp -f "$PP_DIR/app_raw.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"
+          fi
+          if [ -n "$EXT_UUID" ]; then
+            cp -f "$PP_DIR/ext_raw.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"
+          fi
+
+      - name: Build archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -sdk iphoneos \
+            -scheme "${{ env.SCHEME }}" \
+            -configuration "${{ env.CONFIGURATION }}" \
+            -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
+            -destination "generic/platform=iOS" \
+            OTHER_CODE_SIGN_FLAGS="--keychain ${{ env.KEYCHAIN_PATH }}" \
+            SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD=NO \
+            EXCLUDED_ARCHS="x86_64" \
+            ENABLE_ON_DEMAND_RESOURCES=NO \
+            2>&1 | tee /tmp/archive.log || true
+          if grep -q 'ARCHIVE FAILED' /tmp/archive.log || [ ! -d "$RUNNER_TEMP/OBhoD.xcarchive" ]; then
+            tail -n 150 /tmp/archive.log
+            exit 1
+          fi
+
+          APP_DIR="$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app"
+          EXT_DIR="$APP_DIR/PlugIns/TunnelExtension.appex"
+
+          codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+            --entitlements "TunnelExtension/TunnelExtension.entitlements" \
+            --generate-entitlement-der \
+            --keychain "$RUNNER_TEMP/signing.keychain-db" \
+            "$EXT_DIR"
+
+          codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+            --entitlements "OBhoD/App/OBhoD.entitlements" \
+            --generate-entitlement-der \
+            --keychain "$RUNNER_TEMP/signing.keychain-db" \
+            "$APP_DIR"
+
+      - name: Export IPA
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/OBhoD.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "scripts/export.plist" \
+            OTHER_CODE_SIGN_FLAGS="--keychain ${{ env.KEYCHAIN_PATH }}" \
+            2>&1 | tee /tmp/export.log
+          if grep -q 'EXPORT FAILED' /tmp/export.log; then
+            grep -A5 -B5 'error:' /tmp/export.log | tail -30
+            exit 1
+          fi
+
+      - name: Rename IPA
+        run: |
+          VERSION=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleShortVersionString | grep -oE '[0-9.]+' | head -1)
+          BUILD=$(defaults read "$RUNNER_TEMP/OBhoD.xcarchive/Info.plist" ApplicationProperties | grep CFBundleVersion | grep -oE '[0-9]+' | head -1)
+          FINAL_NAME="OBhoD-ios-${VERSION:-1.4}-b${BUILD:-1}.ipa"
+          FOUND_IPA=$(find "$RUNNER_TEMP/export" -name "*.ipa" | head -1)
+          test -n "$FOUND_IPA"
+          mv "$FOUND_IPA" "$RUNNER_TEMP/export/${FINAL_NAME}"
+          echo "IPA_PATH=$RUNNER_TEMP/export/${FINAL_NAME}" >> $GITHUB_ENV
+          echo "IPA_NAME=${FINAL_NAME}" >> $GITHUB_ENV
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_PATH }}
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
