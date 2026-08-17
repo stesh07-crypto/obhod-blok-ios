@@ -73,9 +73,20 @@ final class ConnectionHealthMonitor: ObservableObject {
         return "\(pingMilliseconds) мс"
     }
 
-    func qualityText(isRunning: Bool, isConnecting: Bool, activeConnections: Int) -> String {
-        if isConnecting || isTransitioning {
+    func qualityText(
+        isRunning: Bool,
+        isConnecting: Bool,
+        isRecovering: Bool,
+        activeConnections: Int
+    ) -> String {
+        // This label is driven by the real transport-recovery state from the
+        // NetworkExtension. A mere UI path transition or one zero-worker sample
+        // is not enough to claim that the VPN is reconnecting.
+        if isRecovering {
             return "Переподключение"
+        }
+        if isConnecting && !isRunning {
+            return "Подключение"
         }
         guard isRunning else { return "—" }
         if reachabilityPoor || networkLabel == "Нет сети" {
