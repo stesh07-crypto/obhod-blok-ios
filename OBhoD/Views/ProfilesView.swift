@@ -3,6 +3,7 @@ import SwiftUI
 struct ProfilesView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
     @EnvironmentObject var profilesStore: ProfilesStore
+    @ObservedObject private var connectionHealth = ConnectionHealthMonitor.shared
 
     @State private var showSubscriptionsSheet = false
     @State private var initialURL: String? = nil
@@ -19,6 +20,12 @@ struct ProfilesView: View {
                         currentProfile: profilesStore.currentProfile,
                         isRunning: tunnelManager.isRunning,
                         isConnecting: tunnelManager.isConnecting,
+                        quality: connectionHealth.qualityText(
+                            isRunning: tunnelManager.isRunning,
+                            isConnecting: tunnelManager.isConnecting,
+                            activeConnections: tunnelManager.activeConnections
+                        ),
+                        network: connectionHealth.networkLabel,
                         onToggle: toggleConnection
                     )
                     .padding(.horizontal)
@@ -30,7 +37,7 @@ struct ProfilesView: View {
                         isConnecting: tunnelManager.isConnecting,
                         uptime: tunnelManager.uptimeString,
                         activeConnections: tunnelManager.activeConnections,
-                        downloaded: tunnelManager.downloadedMBString,
+                        ping: connectionHealth.pingText,
                         uploaded: tunnelManager.uploadedMBString
                     )
                     .padding(.horizontal)
@@ -64,11 +71,14 @@ struct ProfilesView: View {
                     } else {
                         LazyVStack(spacing: 12) {
                             ForEach(profilesStore.profiles) { profile in
+                                let isActive = profile.id == profilesStore.currentProfileId
                                 ProfileCardView(
                                     profile: profile,
-                                    isActive: profile.id == profilesStore.currentProfileId,
-                                    isRunning: tunnelManager.isRunning && profile.id == profilesStore.currentProfileId,
+                                    isActive: isActive,
+                                    isRunning: tunnelManager.isRunning && isActive,
+                                    isRefreshing: profilesStore.isRefreshing && isActive,
                                     onSelect: { selectProfile(profile) },
+                                    onRefresh: refreshProfiles,
                                     onEdit: { editingProfile = profile },
                                     onDelete: { profilesStore.remove(id: profile.id) }
                                 )
@@ -80,36 +90,11 @@ struct ProfilesView: View {
                 .padding(.bottom, 24)
             }
             .refreshable {
-                let res = await profilesStore.refreshSubscriptions()
-                if res.refreshed > 0 {
-                    toastMessage = "Обновлено \(res.refreshed) профилей"
-                    showToast = true
-                } else if res.failed > 0 {
-                    toastMessage = "Не удалось обновить подписку"
-                    showToast = true
-                }
+                await refreshProfilesAsync()
             }
             .navigationTitle("OBhoD")
             .toolbar {
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    if profilesStore.isRefreshing {
-                        ProgressView()
-                            .tint(.orange)
-                    } else {
-                        Button {
-                            Task {
-                                let res = await profilesStore.refreshSubscriptions()
-                                if res.refreshed > 0 {
-                                    toastMessage = "Обновлено \(res.refreshed) профилей"
-                                    showToast = true
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundColor(.primary)
-                        }
-                    }
-
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showSubscriptionsSheet = true
                     } label: {
@@ -138,6 +123,15 @@ struct ProfilesView: View {
                         .padding(.bottom, 16)
                 }
             }
+        }
+        .onAppear {
+            syncHealthActivity()
+        }
+        .onChange(of: tunnelManager.isRunning) { _ in
+            syncHealthActivity()
+        }
+        .onChange(of: tunnelManager.isConnecting) { _ in
+            syncHealthActivity()
         }
         .onReceive(NotificationCenter.default.publisher(for: .importSubscriptionURL)) { note in
             if let url = note.object as? URL {
@@ -171,6 +165,27 @@ struct ProfilesView: View {
         profilesStore.setActive(id: profile.id)
         tunnelManager.connect(profile: profile)
     }
+
+    private func syncHealthActivity() {
+        connectionHealth.setTunnelActive(tunnelManager.isRunning || tunnelManager.isConnecting)
+    }
+
+    private func refreshProfiles() {
+        Task {
+            await refreshProfilesAsync()
+        }
+    }
+
+    private func refreshProfilesAsync() async {
+        let res = await profilesStore.refreshSubscriptions()
+        if res.refreshed > 0 {
+            toastMessage = "Обновлено \(res.refreshed) профилей"
+            showToast = true
+        } else if res.failed > 0 {
+            toastMessage = "Не удалось обновить подписку"
+            showToast = true
+        }
+    }
 }
 
 // MARK: – 1. 3D Neon Connect Hero Card
@@ -179,6 +194,8 @@ private struct NeonConnectHeroCard: View {
     let currentProfile: ConnectionProfile?
     let isRunning: Bool
     let isConnecting: Bool
+    let quality: String
+    let network: String
     let onToggle: () -> Void
 
     @State private var isPulsing = false
@@ -230,6 +247,17 @@ private struct NeonConnectHeroCard: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(currentProfile?.isExpired == true ? .red : .secondary)
             }
+
+            if isRunning || isConnecting {
+                VStack(spacing: 4) {
+                    Text("Качество: \(quality)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(qualityColor)
+                    Text("Сеть: \(network)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
@@ -246,6 +274,15 @@ private struct NeonConnectHeroCard: View {
         return .orange.opacity(0.6)
     }
 
+    private var qualityColor: Color {
+        switch quality {
+        case "Отличное": return .green
+        case "Нестабильное": return .red
+        case "Переподключение": return .orange
+        default: return .secondary
+        }
+    }
+
     private var statusLabel: String {
         if isConnecting { return "ПОДКЛЮЧЕНИЕ" }
         if isRunning { return "АКТИВЕН" }
@@ -260,7 +297,7 @@ private struct LiveStatsGrid: View {
     let isConnecting: Bool
     let uptime: String
     let activeConnections: Int
-    let downloaded: String
+    let ping: String
     let uploaded: String
 
     var body: some View {
@@ -278,9 +315,9 @@ private struct LiveStatsGrid: View {
                 color: activeConnections > 0 ? .green : (isConnecting ? .orange : .purple)
             )
             StatCard(
-                icon: "arrow.down.circle.fill",
-                title: "Скачано",
-                value: downloaded,
+                icon: "wave.3.right",
+                title: "Пинг",
+                value: (isRunning || isConnecting) ? ping : "—",
                 color: .teal
             )
             StatCard(
@@ -333,7 +370,9 @@ private struct ProfileCardView: View {
     let profile: ConnectionProfile
     let isActive: Bool
     let isRunning: Bool
+    let isRefreshing: Bool
     let onSelect: () -> Void
+    let onRefresh: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -385,6 +424,23 @@ private struct ProfileCardView: View {
             }
 
             Spacer()
+
+            if isActive {
+                if isRefreshing {
+                    ProgressView()
+                        .tint(.orange)
+                        .frame(width: 32, height: 32)
+                } else {
+                    Button(action: onRefresh) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.orange)
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Обновить профиль")
+                }
+            }
 
             Menu {
                 Button(action: onEdit) {
