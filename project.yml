@@ -9,7 +9,6 @@ options:
   groupOrdering:
     - pattern: 'OBhoD'
     - pattern: 'TunnelExtension'
-    - pattern: 'LiveActivityExtension'
     - pattern: 'Shared'
 
 settings:
@@ -38,7 +37,6 @@ targets:
         excludes:
           - '**/*.md'
           - 'Core/GoClient.swift'
-      - path: Shared/OBhoDLiveActivityAttributes.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios
@@ -59,7 +57,6 @@ targets:
           CODE_SIGN_ENTITLEMENTS: OBhoD/App/OBhoD.entitlements
     dependencies:
       - target: TunnelExtension
-      - target: LiveActivityExtension
     entitlements:
       path: OBhoD/App/OBhoD.entitlements
 
@@ -97,31 +94,3 @@ targets:
         embed: false
     entitlements:
       path: TunnelExtension/TunnelExtension.entitlements
-
-  # ── Live Activity / Dynamic Island ─────────────────────────────────────
-  # WidgetKit renders the Lock Screen and Dynamic Island surfaces. The app
-  # owns ActivityKit lifecycle and sends dynamic state to this extension.
-  LiveActivityExtension:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: '16.1'
-    sources:
-      - path: LiveActivityExtension
-      - path: Shared/OBhoDLiveActivityAttributes.swift
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios.liveactivity
-        PRODUCT_NAME: OBhoDLiveActivity
-        INFOPLIST_FILE: LiveActivityExtension/Info.plist
-        IPHONEOS_DEPLOYMENT_TARGET: '16.1'
-        TARGETED_DEVICE_FAMILY: "1"
-        APPLICATION_EXTENSION_API_ONLY: YES
-        SKIP_INSTALL: YES
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: Apple Distribution
-        PROVISIONING_PROFILE_SPECIFIER: OBhod_live
-      configs:
-        Release:
-          CODE_SIGN_STYLE: Manual
-          CODE_SIGN_IDENTITY: Apple Distribution
-          PROVISIONING_PROFILE_SPECIFIER: OBhod_live
