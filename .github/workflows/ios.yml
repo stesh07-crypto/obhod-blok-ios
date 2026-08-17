@@ -9,7 +9,7 @@ on:
       upload_testflight:
         description: 'Upload to TestFlight (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
 
 env:
   IOS_DEPLOYMENT_TARGET: '15.0'
@@ -83,19 +83,16 @@ jobs:
           KEY_PASS="${KEYCHAIN_PASSWORD:-buildpassword123}"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
-          # Create and unlock temporary build keychain
           security create-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEY_PASS" "$KEYCHAIN_PATH"
 
-          # 1. Apple WWDR Intermediate Certificates
           echo "Downloading Apple WWDR CA..."
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer" -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
           curl -sSfL "https://www.apple.com/certificateauthority/AppleWWDRCAG6.cer" -o "$RUNNER_TEMP/AppleWWDRCAG6.cer" || true
           security import "$RUNNER_TEMP/AppleWWDRCAG6.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
 
-          # 2. Native macOS LibreSSL conversion & import
           python3 - << 'EOF'
           import base64, os, re, subprocess
           from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
@@ -109,7 +106,6 @@ jobs:
           key_pem = None
           cert_pem = None
 
-          # Try loading PKCS12
           for pass_candidate in [b"", b"buildpassword123", os.environ.get('CERTIFICATE_PASSWORD', '').encode()]:
               try:
                   p12_obj = pkcs12.load_pkcs12(raw_data, pass_candidate)
@@ -132,7 +128,6 @@ jobs:
                   f.write(key_pem)
               with open(cert_path, 'wb') as f:
                   f.write(cert_pem)
-              # Create legacy p12 using macOS native LibreSSL
               subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', key_path, '-in', cert_path, '-out', out_p12, '-passout', 'pass:buildpassword123', '-name', 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'], check=True)
               print("Successfully created native macOS PKCS12!")
           else:
@@ -149,7 +144,6 @@ jobs:
           security import "$RUNNER_TEMP/certificate_native.p12" \
             -A -T /usr/bin/codesign -k "$KEYCHAIN_PATH"
 
-          # 3. Set partition list and default keychain
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEY_PASS" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
@@ -166,7 +160,6 @@ jobs:
           PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PP_DIR"
 
-          # 1. Main App Profile (from repository or fallback to secret)
           if [ -f "provisioning/OBhod_app.mobileprovision" ]; then
             cp -f "provisioning/OBhod_app.mobileprovision" "$PP_DIR/app_raw.mobileprovision"
             echo "Used provisioning/OBhod_app.mobileprovision from repository"
@@ -179,7 +172,6 @@ jobs:
             "
           fi
 
-          # 2. Tunnel Extension Profile (from repository or fallback to secret)
           if [ -f "provisioning/OBhod_ext.mobileprovision" ]; then
             cp -f "provisioning/OBhod_ext.mobileprovision" "$PP_DIR/ext_raw.mobileprovision"
             echo "Used provisioning/OBhod_ext.mobileprovision from repository"
@@ -192,7 +184,6 @@ jobs:
             "
           fi
 
-          # 3. Live Activity Extension Profile (new bundle id)
           if [ -f "provisioning/OBhod_live.mobileprovision" ]; then
             cp -f "provisioning/OBhod_live.mobileprovision" "$PP_DIR/live_raw.mobileprovision"
             echo "Used provisioning/OBhod_live.mobileprovision from repository"
@@ -208,7 +199,6 @@ jobs:
             exit 1
           fi
 
-          # 4. Copy by UUID (required by Xcode codesign)
           APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           LIVE_UUID=$(security cms -D -i "$PP_DIR/live_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
@@ -263,17 +253,14 @@ jobs:
           EXT_DIR="$APP_DIR/PlugIns/TunnelExtension.appex"
           LIVE_DIR="$APP_DIR/PlugIns/OBhoDLiveActivity.appex"
 
-          # 1. Sign Tunnel Extension with explicit NetworkExtension/App Group entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "TunnelExtension/TunnelExtension.entitlements" \
             --generate-entitlement-der \
             --keychain "$RUNNER_TEMP/signing.keychain-db" \
             "$EXT_DIR"
 
-          # Live Activity has no custom entitlements; keep Xcode's profile-backed signature intact.
           codesign --verify --strict "$LIVE_DIR"
 
-          # 2. Sign Main App with OBhoD.entitlements after child extensions are final
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "OBhoD/App/OBhoD.entitlements" \
             --generate-entitlement-der \
@@ -324,7 +311,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to TestFlight
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upload_testflight == 'true' }}
+        if: ${{ github.event.inputs.upload_testflight != 'false' }}
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
