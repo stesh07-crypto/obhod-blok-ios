@@ -17,7 +17,6 @@ struct ProfilesView: View {
                 VStack(spacing: 16) {
                     // ── 1. 3D Neon Quick Connect Card ──────────────────────────
                     NeonConnectHeroCard(
-                        currentProfile: profilesStore.currentProfile,
                         isRunning: tunnelManager.isRunning,
                         isConnecting: tunnelManager.isConnecting,
                         quality: connectionHealth.qualityText(
@@ -191,7 +190,6 @@ struct ProfilesView: View {
 // MARK: – 1. 3D Neon Connect Hero Card
 
 private struct NeonConnectHeroCard: View {
-    let currentProfile: ConnectionProfile?
     let isRunning: Bool
     let isConnecting: Bool
     let quality: String
@@ -240,13 +238,6 @@ private struct NeonConnectHeroCard: View {
             }
             .buttonStyle(.plain)
             .onAppear { isPulsing = true }
-
-            // Profile name intentionally removed from under the connect button.
-            if let expBadge = currentProfile?.expirationBadge {
-                Text(expBadge)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(currentProfile?.isExpired == true ? .red : .secondary)
-            }
 
             if isRunning || isConnecting {
                 VStack(spacing: 4) {
