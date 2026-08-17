@@ -108,12 +108,18 @@ enum GoClient {
             free(pVkAnonPath)
         }
 
+        // Build 166 memory experiment: the active profile currently carries
+        // four VK hashes, so 9 workers/hash gives exactly 36 TURN/DTLS workers.
+        // Keep the Go-side hard cap and topology intact; this is deliberately a
+        // reversible input cap so we can compare 36 against builds 164/165.
+        let effectiveWorkersPerHash = min(max(workers, 1), 9)
+
         return WDTT_Start(
             pPeer,
             pHashes,
             pPassword,
             Int32(port),
-            Int32(workers),
+            Int32(effectiveWorkersPerHash),
             pDeviceID,
             pDns,
             pObfsMode,
