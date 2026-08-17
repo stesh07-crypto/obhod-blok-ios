@@ -12,6 +12,14 @@ struct OBhoDApp: App {
             ContentView()
                 .environmentObject(tunnelManager)
                 .environmentObject(profilesStore)
+                .onOpenURL { url in
+                    DeepLinkRouter.handle(url)
+                }
+                .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                    if let url = activity.webpageURL {
+                        DeepLinkRouter.handle(url)
+                    }
+                }
         }
     }
 }
@@ -25,7 +33,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         open url: URL,
         options: [UIApplication.OpenURLOptionsKey: Any] = [:]
     ) -> Bool {
-        handleQwdttURL(url)
+        Task { @MainActor in
+            DeepLinkRouter.handle(url)
+        }
         return true
     }
 
@@ -34,18 +44,36 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         continue userActivity: NSUserActivity,
         restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
     ) -> Bool {
-        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
-           let url = userActivity.webpageURL {
-            handleQwdttURL(url)
-            return true
+        guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+              let url = userActivity.webpageURL else {
+            return false
         }
-        return false
+        Task { @MainActor in
+            DeepLinkRouter.handle(url)
+        }
+        return true
     }
+}
 
-    // MARK: Private
+// MARK: – Deep links
 
-    private func handleQwdttURL(_ url: URL) {
+@MainActor
+private enum DeepLinkRouter {
+    private static var lastHandledURL = ""
+    private static var lastHandledAt = Date.distantPast
+
+    static func handle(_ url: URL) {
         let absolute = url.absoluteString
+        let now = Date()
+
+        // SwiftUI and UIApplicationDelegate may both receive the same URL.
+        // Treat those callbacks as one event, not two profile imports.
+        if absolute == lastHandledURL,
+           now.timeIntervalSince(lastHandledAt) < 2.0 {
+            return
+        }
+        lastHandledURL = absolute
+        lastHandledAt = now
 
         // Bot universal link: https://test-36.ru/import?url=<subscription>
         if absolute.contains("test-36.ru/import"),
@@ -89,12 +117,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
         // qwdtt://config?peer=...&hashes=...&pass=...  (single profile QR)
         if url.host == "config" || url.absoluteString.hasPrefix("qwdtt://config") {
-            Task { @MainActor in
-                NotificationCenter.default.post(
-                    name: .didReceiveQwdttConfig,
-                    object: url
-                )
-            }
+            NotificationCenter.default.post(
+                name: .didReceiveQwdttConfig,
+                object: url
+            )
         }
     }
 
@@ -103,7 +129,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     /// the import can finish even before SwiftUI has mounted its onReceive hooks.
     /// If the remote payload cannot be fetched or parsed, fall back to the
     /// existing import sheet and put the URL on the clipboard for recovery.
-    private func importSubscription(_ rawURL: URL) {
+    private static func importSubscription(_ rawURL: URL) {
         let subURL = normalizedQwdttSubscriptionURL(rawURL)
 
         Task { @MainActor in
@@ -125,7 +151,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     /// The bot format for OBhoD is qwdtt. Keep links generated without an
     /// explicit format backward-compatible by adding it client-side.
-    private func normalizedQwdttSubscriptionURL(_ url: URL) -> URL {
+    private static func normalizedQwdttSubscriptionURL(_ url: URL) -> URL {
         guard url.scheme?.lowercased().hasPrefix("http") == true,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.host?.lowercased() == "test-36.ru",
