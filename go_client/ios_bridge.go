@@ -763,10 +763,15 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			numW = 1
 		}
 	} else {
+		const iosMemoryTestWorkers = 72
+		if numW > iosMemoryTestWorkers {
+			numW = iosMemoryTestWorkers
+		}
 		if numW < workersPerGroup {
 			numW = workersPerGroup
 		}
 		numW = (numW / workersPerGroup) * workersPerGroup
+		logFn(fmt.Sprintf("[КЛИЕНТ] iOS активных workers=%d (hard cap=%d)", numW, maxWorkers), false)
 	}
 
 	numGroups := (numW + workersPerGroup - 1) / workersPerGroup
