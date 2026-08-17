@@ -35,6 +35,9 @@ struct ContentView: View {
                 NotificationCenter.default.post(name: .importSubscriptionURL, object: url)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .didAutoImportSubscription)) { _ in
+            selectedTab = 0
+        }
         .onReceive(NotificationCenter.default.publisher(for: .didReceiveQwdttConfig)) { note in
             if let url = note.object as? URL {
                 selectedTab = 0
