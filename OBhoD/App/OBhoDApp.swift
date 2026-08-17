@@ -4,9 +4,12 @@ import UIKit
 @main
 struct OBhoDApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var tunnelManager = TunnelManager.shared
     @StateObject private var profilesStore = ProfilesStore.shared
     @StateObject private var connectionHealth = ConnectionHealthMonitor.shared
+
+    private let defaults = AppGroup.sharedDefaults ?? UserDefaults.standard
 
     var body: some Scene {
         WindowGroup {
@@ -16,10 +19,18 @@ struct OBhoDApp: App {
                 .onAppear {
                     syncRuntimePresentation()
                 }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active {
+                        syncRuntimePresentation()
+                    }
+                }
                 .onChange(of: tunnelManager.isRunning) { _ in
                     syncRuntimePresentation()
                 }
                 .onChange(of: tunnelManager.isConnecting) { _ in
+                    syncRuntimePresentation()
+                }
+                .onChange(of: tunnelManager.connectedSince) { _ in
                     syncRuntimePresentation()
                 }
                 .onChange(of: tunnelManager.activeConnections) { _ in
@@ -51,9 +62,36 @@ struct OBhoDApp: App {
 
     @MainActor
     private func syncRuntimePresentation() {
+        let sharedTunnelRunning = defaults.bool(forKey: AppGroup.Keys.tunnelRunning)
         connectionHealth.setTunnelActive(tunnelManager.isRunning || tunnelManager.isConnecting)
 
+        if tunnelManager.isRunning, let currentSince = tunnelManager.connectedSince {
+            let storedTimestamp = defaults.double(forKey: AppGroup.Keys.connectedSinceUnix)
+            if storedTimestamp > 0 {
+                let storedSince = Date(timeIntervalSince1970: storedTimestamp)
+                if abs(currentSince.timeIntervalSince(storedSince)) > 2 {
+                    // TunnelManager is process-local; reuse the persisted start time
+                    // when the app relaunches while NetworkExtension stayed alive.
+                    tunnelManager.connectedSince = storedSince
+                }
+            } else {
+                defaults.set(currentSince.timeIntervalSince1970, forKey: AppGroup.Keys.connectedSinceUnix)
+            }
+        } else if !tunnelManager.isConnecting && !sharedTunnelRunning {
+            defaults.removeObject(forKey: AppGroup.Keys.connectedSinceUnix)
+        }
+
         if #available(iOS 16.1, *) {
+            // On a cold app launch the NetworkExtension can already be alive while
+            // NETunnelProviderManager is still loading. Do not destroy an existing
+            // Live Activity during that short unresolved state.
+            if !tunnelManager.isRunning,
+               !tunnelManager.isConnecting,
+               sharedTunnelRunning,
+               tunnelManager.connectedSince == nil {
+                return
+            }
+
             LiveActivityManager.shared.sync(
                 isRunning: tunnelManager.isRunning,
                 activeConnections: tunnelManager.activeConnections,
