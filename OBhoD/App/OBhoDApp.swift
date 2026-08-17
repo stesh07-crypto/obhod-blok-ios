@@ -13,11 +13,15 @@ struct OBhoDApp: App {
                 .environmentObject(tunnelManager)
                 .environmentObject(profilesStore)
                 .onOpenURL { url in
-                    DeepLinkRouter.handle(url)
+                    Task { @MainActor in
+                        DeepLinkRouter.handle(url)
+                    }
                 }
                 .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                     if let url = activity.webpageURL {
-                        DeepLinkRouter.handle(url)
+                        Task { @MainActor in
+                            DeepLinkRouter.handle(url)
+                        }
                     }
                 }
         }
