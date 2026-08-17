@@ -143,8 +143,15 @@ enum GoClient {
         WDTT_WaitWireGuardReady(timeoutMilliseconds(timeout)) != 0
     }
 
+    /// A physical-path event is only a hint. Individual TURN workers already
+    /// retry transient socket failures on Wi-Fi/cellular handoff while keeping
+    /// their credentials. Cancelling the whole runOnce here also closes the
+    /// userspace WireGuard device, creating a self-inflicted traffic outage.
+    /// Keep the VPN/WireGuard runtime alive and only ask the health watchdog to
+    /// re-evaluate the current transport. A real sustained failure can still
+    /// request a transport reconnect; manual reconnect remains explicit.
     static func notifyNetworkChange() {
-        WDTT_NotifyNetworkChange()
+        WDTT_WakeHealthCheck()
     }
 
     /// Rebuild only the current Go transport attempt. The iOS VPN session,
