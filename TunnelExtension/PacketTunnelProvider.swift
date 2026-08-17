@@ -37,6 +37,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         NSLog("[WDTT-Ext] startTunnel called")
         let startGeneration = beginStart(completionHandler: completionHandler)
 
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        appendLog("[ДИАГ] NetworkExtension startTunnel: build=\(build), generation=\(startGeneration)", isError: false)
+
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
         defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
         defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
@@ -46,6 +49,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let data = defaults?.data(forKey: AppGroup.Keys.activeProfileJSON),
             let profile = try? JSONDecoder().decode(ConnectionProfile.self, from: data)
         else {
+            appendLog("[ДИАГ] startTunnel abort: активный профиль не прочитан из App Group", isError: true)
             finishStart(generation: startGeneration, error: TunnelError.noActiveProfile)
             return
         }
@@ -73,6 +77,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             )
 
             guard result == 0 else {
+                self.appendLog("[ДИАГ] GoClient.start завершился кодом \(result)", isError: true)
                 self.failStart(startGeneration, error: TunnelError.startFailed)
                 return
             }
@@ -80,6 +85,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.defaults?.set("Подключение TURN/DTLS…", forKey: AppGroup.Keys.lastStats)
 
             guard GoClient.waitUntilTransportReady(timeout: 75) else {
+                self.appendLog("[ДИАГ] Bootstrap timeout: TURN/DTLS не подтвердил ready за 75с", isError: true)
                 self.failStart(startGeneration, error: TunnelError.transportTimeout)
                 return
             }
@@ -95,6 +101,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
                 if let error {
                     NSLog("[WDTT-Ext] setTunnelNetworkSettings error: \(error)")
+                    self.appendLog("[ДИАГ] setTunnelNetworkSettings ERROR: \(error.localizedDescription)", isError: true)
                     self.failStart(startGeneration, error: error)
                     return
                 }
@@ -104,10 +111,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
                     self.defaults?.set("Запуск WireGuard…", forKey: AppGroup.Keys.lastStats)
                     guard GoClient.activateWireGuard() else {
+                        self.appendLog("[ДИАГ] WDTT_ActivateWireGuard вернул ошибку", isError: true)
                         self.failStart(startGeneration, error: TunnelError.wireGuardStartFailed)
                         return
                     }
                     guard GoClient.waitUntilWireGuardReady(timeout: 20) else {
+                        self.appendLog("[ДИАГ] WireGuard ready timeout: 20с", isError: true)
                         self.failStart(startGeneration, error: TunnelError.wireGuardTimeout)
                         return
                     }
@@ -120,6 +129,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
                     self.defaults?.set("Подключено", forKey: AppGroup.Keys.lastStats)
                     self.appendLog("[VPN] Туннель полностью готов", isError: false)
+                    self.appendLog("[ДИАГ] Tunnel ready: NetworkExtension + routes + WireGuard + packet bridge активны", isError: false)
                     NSLog("[WDTT-Ext] Tunnel started successfully")
                     self.finishStart(generation: startGeneration, error: nil)
                 }
@@ -132,6 +142,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler: @escaping () -> Void
     ) {
         NSLog("[WDTT-Ext] stopTunnel: \(reason.rawValue)")
+
+        let reasonName = stopReasonName(rawValue: reason.rawValue)
+        let statsSnapshot = defaults?.string(forKey: AppGroup.Keys.lastStats) ?? "нет stats"
+        let goAlive = GoClient.isRunning
+        let wasMarkedRunning = defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) ?? false
+        let unexpected = reason.rawValue != 0 && reason.rawValue != 1
+        appendLog(
+            "[ДИАГ] stopTunnel: reason=\(reasonName)(\(reason.rawValue)), goAlive=\(goAlive), tunnelRunning=\(wasMarkedRunning), lastStats=\(statsSnapshot)",
+            isError: unexpected
+        )
 
         let pending = invalidateLifecycleForStop()
         pending?(TunnelError.cancelled)
@@ -155,11 +175,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func sleep(completionHandler: @escaping () -> Void) {
         appendLog("[VPN] sleep: соединения сохранены", isError: false)
+        appendLog("[ДИАГ] iOS sleep: Go/WireGuard не останавливаем", isError: false)
         completionHandler()
     }
 
     override func wake() {
         appendLog("[VPN] wake: проверка здоровья транспорта", isError: false)
+        appendLog("[ДИАГ] iOS wake: отправлен health-check без teardown", isError: false)
         GoClient.wakeHealthCheck()
     }
 
@@ -172,6 +194,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         switch command {
         case "reconnect":
             let accepted = GoClient.requestTransportReconnect()
+            appendLog("[ДИАГ] providerMessage reconnect: accepted=\(accepted)", isError: false)
             completionHandler?(Data((accepted ? "ok" : "busy").utf8))
         default:
             completionHandler?(Data("unsupported".utf8))
@@ -321,6 +344,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         monitor.start(queue: pathQueue)
+        appendLog("[ДИАГ] NWPathMonitor запущен", isError: false)
     }
 
     private func handlePath(_ path: Network.NWPath, generation: UInt64) {
@@ -329,9 +353,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pathDebounceWorkItem?.cancel()
 
         guard path.status == .satisfied else {
+            let previous = lastStablePath?.rawValue ?? "none"
             pathWasUnavailable = true
             defaults?.set("Нет сети", forKey: AppGroup.Keys.physicalNetworkLabel)
             appendLog("[СЕТЬ] Физическая сеть временно недоступна", isError: false)
+            appendLog("[ДИАГ] NWPath unsatisfied: previous=\(previous), WG остаётся жив; ждём восстановление workers", isError: false)
             return
         }
 
@@ -348,6 +374,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         guard pathType != .other else {
             pathWasUnavailable = true
+            appendLog("[ДИАГ] NWPath satisfied iface=other: считаем переходным состоянием, WireGuard не трогаем", isError: false)
             return
         }
 
@@ -370,7 +397,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.isCurrent(generation) else { return }
-            self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); обновляем транспорт", isError: false)
+            let previousName = previous?.rawValue ?? "temporary-unavailable"
+            self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); проверяем здоровье транспорта", isError: false)
+            self.appendLog("[ДИАГ] Handoff \(previousName) → \(pathType.rawValue): только health-check, TUN/WireGuard не перезапускаются", isError: false)
             GoClient.notifyNetworkChange()
 
             self.pathQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -429,6 +458,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
         defaults?.set("Ошибка подключения", forKey: AppGroup.Keys.lastStats)
         appendLog("[VPN] \(error.localizedDescription)", isError: true)
+        appendLog("[ДИАГ] failStart: generation=\(generation), error=\(error.localizedDescription)", isError: true)
         GoClient.clearPacketHandler()
         GoClient.stop()
         finishStart(generation: generation, error: error)
@@ -441,6 +471,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pendingStartCompletion = nil
         lifecycleLock.unlock()
         return pending
+    }
+
+    private func stopReasonName(rawValue: Int) -> String {
+        switch rawValue {
+        case 0: return "none"
+        case 1: return "userInitiated"
+        case 2: return "providerFailed"
+        case 3: return "noNetworkAvailable"
+        case 4: return "unrecoverableNetworkChange"
+        case 5: return "providerDisabled"
+        case 6: return "authenticationCanceled"
+        case 7: return "configurationFailed"
+        case 8: return "idleTimeout"
+        case 9: return "configurationDisabled"
+        case 10: return "configurationRemoved"
+        case 11: return "superseded"
+        case 12: return "userLogout"
+        case 13: return "userSwitch"
+        case 14: return "connectionFailed"
+        case 15: return "sleep"
+        case 16: return "appUpdate"
+        default: return "unknown"
+        }
     }
 
     // MARK: Logging

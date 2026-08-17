@@ -200,6 +200,19 @@ enum GoClient {
         let detailed = AppGroup.sharedDefaults?.bool(forKey: AppGroup.Keys.detailedLogs) ?? false
         if detailed { return true }
 
+        // Always surface event-based diagnostics even in quiet mode. These are
+        // intentionally sparse and are what lets us distinguish a worker/pool
+        // failure from a NetworkExtension stop or a physical-path transition.
+        if line.hasPrefix("[ДИАГ]") { return true }
+
+        // WorkerGroup already classifies transient iOS socket/handoff failures
+        // and TURN allocation problems. Keep those lines visible in the normal
+        // Logs screen so a post-mortem does not require Detailed Logs mode.
+        if line.contains("[ВОРКЕР #") &&
+            (line.contains("[СЕТЬ]") || line.contains("[TURN]")) {
+            return true
+        }
+
         // Android-style quiet mode: one useful lifecycle event instead of one
         // line per session/relay/VKCalls step/dispatcher registration.
         if line.contains("[DTLS] Соединение установлено") { return true }
