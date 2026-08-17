@@ -51,6 +51,7 @@ final class ConnectionHealthMonitor: ObservableObject {
             pingConnection?.cancel()
             pingConnection = nil
             pingMilliseconds = nil
+            defaults.removeObject(forKey: AppGroup.Keys.lastPingMilliseconds)
             networkLabel = "—"
             consecutivePingFailures = 0
             reachabilityPoor = false
@@ -161,7 +162,9 @@ final class ConnectionHealthMonitor: ObservableObject {
 
     private func applyPingResult(_ value: Int?) {
         if let value {
-            pingMilliseconds = max(1, value)
+            let ping = max(1, value)
+            pingMilliseconds = ping
+            defaults.set(ping, forKey: AppGroup.Keys.lastPingMilliseconds)
             consecutivePingFailures = 0
             reachabilityPoor = false
             return
@@ -172,6 +175,7 @@ final class ConnectionHealthMonitor: ObservableObject {
         // declare the connection poor after three consecutive failed probes.
         if consecutivePingFailures >= 3 {
             pingMilliseconds = nil
+            defaults.removeObject(forKey: AppGroup.Keys.lastPingMilliseconds)
             reachabilityPoor = true
         }
     }
