@@ -52,7 +52,7 @@ final class LiveActivityManager {
             pingValue = nil
         }
 
-        let network = defaults.string(forKey: AppGroup.Keys.physicalNetwork) ?? "—"
+        let network = defaults.string(forKey: AppGroup.Keys.physicalNetworkLabel) ?? "—"
 
         return OBhoDLiveActivityAttributes.ContentState(
             activeConnections: max(0, activeConnections),
@@ -120,7 +120,7 @@ final class LiveActivityManager {
         let finalState = OBhoDLiveActivityAttributes.ContentState(
             activeConnections: 0,
             pingMilliseconds: nil,
-            network: defaults.string(forKey: AppGroup.Keys.physicalNetwork) ?? "—",
+            network: defaults.string(forKey: AppGroup.Keys.physicalNetworkLabel) ?? "—",
             isRecovering: false
         )
 
