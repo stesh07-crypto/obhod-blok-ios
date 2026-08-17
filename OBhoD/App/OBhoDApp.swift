@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct OBhoDApp: App {
@@ -46,33 +47,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private func handleQwdttURL(_ url: URL) {
         let absolute = url.absoluteString
 
-        // Intercept bot links: https://test-36.ru/connect/{uuid} or https://test-36.ru/import?url=...
+        // Bot universal link: https://test-36.ru/import?url=<subscription>
         if absolute.contains("test-36.ru/import"),
            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let target = comps.queryItems?.first(where: { $0.name == "url" })?.value,
-           let subUrl = URL(string: target) {
-            Task { @MainActor in
-                NotificationCenter.default.post(
-                    name: .didReceiveSubscriptionURL,
-                    object: subUrl
-                )
-            }
+           let subURL = URL(string: target) {
+            importSubscription(subURL)
             return
         }
 
+        // Legacy bot link: https://test-36.ru/connect/{uuid}
         if absolute.contains("test-36.ru/connect/") {
             let components = url.pathComponents
-            if let uuid = components.last, !uuid.isEmpty, uuid != "connect" {
-                let subUrlString = "https://test-36.ru/sub/\(uuid)?format=qwdtt"
-                if let subUrl = URL(string: subUrlString) {
-                    Task { @MainActor in
-                        NotificationCenter.default.post(
-                            name: .didReceiveSubscriptionURL,
-                            object: subUrl
-                        )
-                    }
-                    return
-                }
+            if let uuid = components.last, !uuid.isEmpty, uuid != "connect",
+               let subURL = URL(string: "https://test-36.ru/sub/\(uuid)?format=qwdtt") {
+                importSubscription(subURL)
+                return
             }
         }
 
@@ -82,7 +72,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         if url.host == "import",
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let subUrlParam = components.queryItems?.first(where: { $0.name == "url" })?.value {
-            
+
             var targetString = subUrlParam
             if targetString.contains("test-36.ru/connect/") {
                 let parts = targetString.components(separatedBy: "/connect/")
@@ -90,14 +80,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                     targetString = "https://test-36.ru/sub/\(uuid)?format=qwdtt"
                 }
             }
-            
-            if let subUrl = URL(string: targetString) {
-                Task { @MainActor in
-                    NotificationCenter.default.post(
-                        name: .didReceiveSubscriptionURL,
-                        object: subUrl
-                    )
-                }
+
+            if let subURL = URL(string: targetString) {
+                importSubscription(subURL)
                 return
             }
         }
@@ -112,11 +97,57 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             }
         }
     }
+
+    /// Import directly into ProfilesStore instead of relying on a transient
+    /// NotificationCenter event. This makes cold-start deep links reliable:
+    /// the import can finish even before SwiftUI has mounted its onReceive hooks.
+    /// If the remote payload cannot be fetched or parsed, fall back to the
+    /// existing import sheet and put the URL on the clipboard for recovery.
+    private func importSubscription(_ rawURL: URL) {
+        let subURL = normalizedQwdttSubscriptionURL(rawURL)
+
+        Task { @MainActor in
+            do {
+                let importedCount = try await ProfilesStore.shared.importSubscription(from: subURL)
+                NotificationCenter.default.post(
+                    name: .didAutoImportSubscription,
+                    object: importedCount
+                )
+            } catch {
+                UIPasteboard.general.string = subURL.absoluteString
+                NotificationCenter.default.post(
+                    name: .didReceiveSubscriptionURL,
+                    object: subURL
+                )
+            }
+        }
+    }
+
+    /// The bot format for OBhoD is qwdtt. Keep links generated without an
+    /// explicit format backward-compatible by adding it client-side.
+    private func normalizedQwdttSubscriptionURL(_ url: URL) -> URL {
+        guard url.scheme?.lowercased().hasPrefix("http") == true,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.host?.lowercased() == "test-36.ru",
+              components.path.hasPrefix("/sub/") else {
+            return url
+        }
+
+        var items = components.queryItems ?? []
+        if let formatIndex = items.firstIndex(where: { $0.name.lowercased() == "format" }) {
+            items[formatIndex] = URLQueryItem(name: "format", value: "qwdtt")
+        } else {
+            items.append(URLQueryItem(name: "format", value: "qwdtt"))
+        }
+        components.queryItems = items
+        return components.url ?? url
+    }
 }
 
 // MARK: – Notification Names
 
 extension Notification.Name {
     static let didReceiveSubscriptionURL = Notification.Name("didReceiveSubscriptionURL")
+    static let didAutoImportSubscription = Notification.Name("didAutoImportSubscription")
     static let didReceiveQwdttConfig     = Notification.Name("didReceiveQwdttConfig")
 }
