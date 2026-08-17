@@ -147,6 +147,13 @@ enum GoClient {
         WDTT_NotifyNetworkChange()
     }
 
+    /// Rebuild only the current Go transport attempt. The iOS VPN session,
+    /// routes and NetworkExtension stay alive.
+    @discardableResult
+    static func requestTransportReconnect() -> Bool {
+        WDTT_RequestReconnect() != 0
+    }
+
     static func wakeHealthCheck() {
         WDTT_WakeHealthCheck()
     }
