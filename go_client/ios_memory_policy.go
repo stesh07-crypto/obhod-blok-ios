@@ -2,7 +2,10 @@
 
 package main
 
-import "runtime/debug"
+import (
+	"runtime/debug"
+	"time"
+)
 
 const (
 	// Build 162 on-device diagnostics showed the NetworkExtension disappearing
@@ -13,6 +16,7 @@ const (
 	// TURN/DTLS, WireGuard, packet routing, reconnects, or wire format.
 	iOSGoMemoryLimitBytes int64 = 35 * 1024 * 1024
 	iOSGCPercent                = 50
+	iOSFreeMemoryInterval       = 60 * time.Second
 )
 
 func init() {
@@ -22,4 +26,16 @@ func init() {
 	// the default during the steep worker startup ramp observed on-device.
 	debug.SetMemoryLimit(iOSGoMemoryLimitBytes)
 	debug.SetGCPercent(iOSGCPercent)
+
+	// Build 169: after traffic bursts, force Go's scavenger to return idle pages
+	// instead of leaving the extension at its previous mapped high-water mark.
+	// This targets the observed "speedtest then later dies while idle" pattern
+	// without changing workers, transport, WireGuard, queues, or keepalive logic.
+	go func() {
+		ticker := time.NewTicker(iOSFreeMemoryInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			debug.FreeOSMemory()
+		}
+	}()
 }
