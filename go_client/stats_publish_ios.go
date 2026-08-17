@@ -14,11 +14,19 @@ type iosLiveStatsPayload struct {
 	DownloadBytes     int64 `json:"downloadBytes"`
 }
 
+const (
+	iOSZeroWorkerMinChecks         = 5
+	iOSZeroWorkerGracePeriod       = 30 * time.Second
+	iOSZeroWorkerReconnectCooldown = 90 * time.Second
+)
+
 var (
-	iOSStatsWatchMu       sync.Mutex
-	iOSStatsWatchRuntime  *iosRuntime
-	iOSStatsWatchHadLive  bool
-	iOSStatsWatchZeroSince time.Time
+	iOSStatsWatchMu            sync.Mutex
+	iOSStatsWatchRuntime       *iosRuntime
+	iOSStatsWatchHadLive       bool
+	iOSStatsWatchZeroSince     time.Time
+	iOSStatsWatchZeroChecks    int
+	iOSStatsWatchLastReconnect time.Time
 )
 
 func publishStats(s *Stats) {
@@ -40,11 +48,12 @@ func publishStats(s *Stats) {
 	watchActiveConnections(active)
 }
 
-// Android already has a "0 workers for a long time" zombie watchdog. iOS used
-// to rely mostly on TX-without-RX detection, which misses the case where every
-// TURN/DTLS worker silently disappears while the phone is idle. Once this
-// runtime has demonstrated at least one live connection, keep a zero-worker
-// window and rebuild only the transport if it remains empty for 60 seconds.
+// iOS can briefly report zero active TURN/DTLS workers during normal recovery,
+// sleep/wake, or a physical-network handoff. A single zero sample must never
+// rebuild an otherwise healthy VPN session. Once this runtime has demonstrated
+// at least one live connection, require a sustained zero window with several
+// consecutive checks before rebuilding only the Go transport. A separate
+// cooldown prevents a difficult network from entering a periodic restart loop.
 func watchActiveConnections(active int32) {
 	rt := currentIOSRuntime()
 	if rt == nil || rt.ctx.Err() != nil {
@@ -59,25 +68,43 @@ func watchActiveConnections(active int32) {
 		iOSStatsWatchRuntime = rt
 		iOSStatsWatchHadLive = false
 		iOSStatsWatchZeroSince = time.Time{}
+		iOSStatsWatchZeroChecks = 0
+		iOSStatsWatchLastReconnect = time.Time{}
 	}
 
 	if active > 0 {
 		iOSStatsWatchHadLive = true
 		iOSStatsWatchZeroSince = time.Time{}
+		iOSStatsWatchZeroChecks = 0
 	} else if iOSStatsWatchHadLive {
 		if iOSStatsWatchZeroSince.IsZero() {
 			iOSStatsWatchZeroSince = now
-		} else if now.Sub(iOSStatsWatchZeroSince) >= 60*time.Second {
-			// Start a fresh window immediately. If a difficult network still cannot
-			// recover, another bounded repair may happen after another full minute,
-			// never in a tight reconnect loop.
+			iOSStatsWatchZeroChecks = 1
+		} else {
+			iOSStatsWatchZeroChecks++
+		}
+
+		zeroConfirmed := iOSStatsWatchZeroChecks >= iOSZeroWorkerMinChecks &&
+			now.Sub(iOSStatsWatchZeroSince) >= iOSZeroWorkerGracePeriod
+		cooldownReady := iOSStatsWatchLastReconnect.IsZero() ||
+			now.Sub(iOSStatsWatchLastReconnect) >= iOSZeroWorkerReconnectCooldown
+
+		if zeroConfirmed && cooldownReady {
+			// Start a new confirmation window now. If requestReconnect is temporarily
+			// rejected (for example another handoff repair just won the race), we will
+			// wait through another full grace period instead of retrying every 2s.
 			iOSStatsWatchZeroSince = now
+			iOSStatsWatchZeroChecks = 0
 			triggerReconnect = true
 		}
 	}
 	iOSStatsWatchMu.Unlock()
 
-	if triggerReconnect {
-		rt.requestReconnect("watchdog: 0 активных подключений 60 секунд")
+	if triggerReconnect && rt.requestReconnect("watchdog: 0 активных подключений подтверждено 30 секунд") {
+		iOSStatsWatchMu.Lock()
+		if iOSStatsWatchRuntime == rt {
+			iOSStatsWatchLastReconnect = time.Now()
+		}
+		iOSStatsWatchMu.Unlock()
 	}
 }
