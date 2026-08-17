@@ -7,7 +7,6 @@ import Combine
 /// It never owns or restarts the VPN runtime. The NetworkExtension remains the
 /// single owner of TURN/WireGuard; this object only reports the current physical
 /// interface and an approximate end-to-end TCP RTT for presentation in the app.
-@MainActor
 final class ConnectionHealthMonitor: ObservableObject {
     static let shared = ConnectionHealthMonitor()
 
@@ -40,6 +39,7 @@ final class ConnectionHealthMonitor: ObservableObject {
     private var pingConnection: NWConnection?
     private var lastInterface: InterfaceKind?
     private var transitionGeneration: UInt64 = 0
+    private var pingGeneration: UInt64 = 0
     private var tunnelActive = false
     private var consecutivePingFailures = 0
 
@@ -48,9 +48,7 @@ final class ConnectionHealthMonitor: ObservableObject {
         pingTimer = Timer.publish(every: 5.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.measurePingIfNeeded()
-                }
+                self?.measurePingIfNeeded()
             }
     }
 
@@ -61,6 +59,7 @@ final class ConnectionHealthMonitor: ObservableObject {
         if active {
             measurePingIfNeeded()
         } else {
+            pingGeneration &+= 1
             pingConnection?.cancel()
             pingConnection = nil
             pingMilliseconds = nil
@@ -113,7 +112,7 @@ final class ConnectionHealthMonitor: ObservableObject {
                 kind = .other
             }
 
-            Task { @MainActor [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 self?.applyPath(kind)
             }
         }
@@ -153,6 +152,8 @@ final class ConnectionHealthMonitor: ObservableObject {
     private func measurePingIfNeeded() {
         guard tunnelActive, pingConnection == nil else { return }
 
+        pingGeneration &+= 1
+        let generation = pingGeneration
         let started = DispatchTime.now()
         let connection = NWConnection(
             host: NWEndpoint.Host("1.1.1.1"),
@@ -161,36 +162,44 @@ final class ConnectionHealthMonitor: ObservableObject {
         )
         pingConnection = connection
 
-        var finished = false
-        let finish: @Sendable (Int?) -> Void = { [weak self, weak connection] value in
-            guard !finished else { return }
-            finished = true
-            connection?.cancel()
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.pingConnection === connection {
-                    self.pingConnection = nil
-                }
-                self.applyPingResult(value)
-            }
-        }
-
-        connection.stateUpdateHandler = { state in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self else { return }
             switch state {
             case .ready:
                 let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
-                finish(Int(elapsed / 1_000_000))
-            case .failed, .cancelled:
-                finish(nil)
+                DispatchQueue.main.async { [weak self, weak connection] in
+                    self?.finishPing(
+                        generation: generation,
+                        connection: connection,
+                        value: Int(elapsed / 1_000_000)
+                    )
+                }
+            case .failed:
+                DispatchQueue.main.async { [weak self, weak connection] in
+                    self?.finishPing(generation: generation, connection: connection, value: nil)
+                }
             default:
                 break
             }
         }
 
         connection.start(queue: pingQueue)
-        pingQueue.asyncAfter(deadline: .now() + 2.5) {
-            finish(nil)
+        pingQueue.asyncAfter(deadline: .now() + 2.5) { [weak self, weak connection] in
+            DispatchQueue.main.async { [weak self, weak connection] in
+                self?.finishPing(generation: generation, connection: connection, value: nil)
+            }
         }
+    }
+
+    private func finishPing(generation: UInt64, connection: NWConnection?, value: Int?) {
+        guard pingGeneration == generation else { return }
+        pingGeneration &+= 1
+
+        if pingConnection === connection {
+            pingConnection = nil
+        }
+        connection?.cancel()
+        applyPingResult(value)
     }
 
     private func applyPingResult(_ value: Int?) {
