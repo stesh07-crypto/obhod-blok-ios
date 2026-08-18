@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	workerSendBuf      = 8
-	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
-	readBufSize        = 1600
-	socketBufSize      = 128 * 1024
-	keepaliveByte      = 0xFF // DTLS-level keepalive marker
-	keepaliveInterval  = 15 * time.Second
+	workerSendBuf         = 8
+	sessionReadTimeout    = 30 * time.Minute // Increased from 60s to 30min
+	readBufSize           = 1600
+	socketBufSize         = 128 * 1024
+	keepaliveByte         = 0xFF // DTLS-level keepalive marker
+	keepaliveInterval     = 15 * time.Second
+	keepaliveStaggerSlots = 2000 // 0..1999 ms deterministic phase spread
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -53,6 +54,32 @@ func (n *NullLogger) Errorf(_ string, _ ...interface{}) {}
 type connectedUDPConn struct{ *net.UDPConn }
 
 func (c *connectedUDPConn) WriteTo(p []byte, _ net.Addr) (int, error) { return c.Write(p) }
+
+// keepaliveStagger returns a reproducible per-worker phase offset in the
+// 0..2s window. Build 170 uses separate salts for TURN and DTLS so dozens of
+// periodic keepalives do not fire as one allocation/CPU burst. Deterministic
+// staggering makes A/B runs comparable while preserving the 10s/15s cadence.
+func keepaliveStagger(sessionID, salt int) time.Duration {
+	v := (sessionID*137 + salt*503) % keepaliveStaggerSlots
+	if v < 0 {
+		v = -v
+	}
+	return time.Duration(v) * time.Millisecond
+}
+
+func waitKeepalivePhase(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 
 func RunSession(
 	ctx context.Context,
@@ -161,11 +188,15 @@ func RunSession(
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()
 
-	// Keepalive goroutine (TURN binding request)
+	// Keepalive goroutine (TURN binding request). Build 170 staggers only the
+	// initial phase; after that the existing 10s cadence is unchanged.
 	var sessionWg sync.WaitGroup
 	sessionWg.Add(1)
 	go func() {
 		defer sessionWg.Done()
+		if !waitKeepalivePhase(sessCtx, keepaliveStagger(sessionID, 0)) {
+			return
+		}
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
 		for {
@@ -359,9 +390,13 @@ func RunSession(
 	})
 	defer stopDTLS()
 
-	// DTLS Keepalive: prevents TURN allocation timeout and DTLS idle disconnect
+	// DTLS Keepalive: same 15s cadence, with a different deterministic phase
+	// from TURN so periodic maintenance does not synchronize across workers.
 	go func() {
 		defer proxyWg.Done()
+		if !waitKeepalivePhase(sessCtx, keepaliveStagger(sessionID, 1)) {
+			return
+		}
 		t := time.NewTicker(keepaliveInterval)
 		defer t.Stop()
 		ping := []byte{keepaliveByte}
