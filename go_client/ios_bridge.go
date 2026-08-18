@@ -61,9 +61,9 @@ type iosRuntime struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	ready     chan struct{}
-	activate  chan struct{}
-	wgReady   chan struct{}
+	ready      chan struct{}
+	activate   chan struct{}
+	wgReady    chan struct{}
 	healthKick chan struct{}
 
 	readyOnce    sync.Once
@@ -763,7 +763,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			numW = 1
 		}
 	} else {
-		const iosMemoryTestWorkers = 72
+		const iosMemoryTestWorkers = 108
 		if numW > iosMemoryTestWorkers {
 			numW = iosMemoryTestWorkers
 		}

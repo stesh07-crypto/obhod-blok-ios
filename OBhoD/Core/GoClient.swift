@@ -108,10 +108,10 @@ enum GoClient {
             free(pVkAnonPath)
         }
 
-        // Build 173 direct-TUN capacity experiment: the active profile carries
-        // four VK hashes, so 18 workers/hash gives exactly 72 TURN/DTLS workers.
-        // Keep the Go-side 72-worker test ceiling and all transport settings intact.
-        let effectiveWorkersPerHash = min(max(workers, 1), 18)
+        // Build 174 direct-TUN capacity experiment: the active profile carries
+        // four VK hashes, so 27 workers/hash gives exactly 108 TURN/DTLS workers.
+        // Keep all transport and memory settings unchanged for a clean A/B test.
+        let effectiveWorkersPerHash = min(max(workers, 1), 27)
 
         return WDTT_Start(
             pPeer,
