@@ -1,15 +1,14 @@
 import NetworkExtension
 import Network
 import Foundation
-import Darwin
 
 /// Packet Tunnel Provider — the single owner of the Go/TURN/WireGuard runtime.
 ///
 /// Startup is intentionally staged:
 /// 1. Bootstrap TURN/DTLS and receive WireGuard configuration.
 /// 2. Install iOS packet-tunnel routes.
-/// 3. Raise WireGuard.
-/// 4. Start the packet pump and report success to NetworkExtension.
+/// 3. Attach wireguard-go directly to the iOS utun file descriptor.
+/// 4. Report success to NetworkExtension; Swift stays out of the packet data plane.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private let defaults = AppGroup.sharedDefaults
@@ -110,6 +109,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     guard let self, self.isCurrent(startGeneration) else { return }
 
                     self.defaults?.set("Запуск WireGuard…", forKey: AppGroup.Keys.lastStats)
+                    self.appendLog("[ДИАГ] Маршруты iOS готовы; wireguard-go подключается напрямую к utun fd", isError: false)
                     guard GoClient.activateWireGuard() else {
                         self.appendLog("[ДИАГ] WDTT_ActivateWireGuard вернул ошибку", isError: true)
                         self.failStart(startGeneration, error: TunnelError.wireGuardStartFailed)
@@ -122,14 +122,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     }
                     guard self.isCurrent(startGeneration) else { return }
 
-                    self.installPacketBridge(generation: startGeneration)
                     self.startPathMonitor(generation: startGeneration)
 
                     self.defaults?.set(true, forKey: AppGroup.Keys.tunnelRunning)
                     self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
                     self.defaults?.set("Подключено", forKey: AppGroup.Keys.lastStats)
                     self.appendLog("[VPN] Туннель полностью готов", isError: false)
-                    self.appendLog("[ДИАГ] Tunnel ready: NetworkExtension + routes + WireGuard + packet bridge активны", isError: false)
+                    self.appendLog("[ДИАГ] Tunnel ready: NetworkExtension + routes + direct utun ↔ wireguard-go активны", isError: false)
                     NSLog("[WDTT-Ext] Tunnel started successfully")
                     self.finishStart(generation: startGeneration, error: nil)
                 }
@@ -228,32 +227,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
            defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true {
             defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
         }
-    }
-
-    // MARK: Packet bridge
-
-    private func installPacketBridge(generation: UInt64) {
-        GoClient.setPacketHandler { [weak self] data in
-            guard let self, self.isCurrent(generation) else { return }
-            let family = self.protocolFamily(for: data)
-            self.packetFlow.writePackets([data], withProtocols: [NSNumber(value: family)])
-        }
-        readPackets(generation: generation)
-    }
-
-    private func readPackets(generation: UInt64) {
-        packetFlow.readPackets { [weak self] packets, _ in
-            guard let self, self.isCurrent(generation) else { return }
-            for packet in packets {
-                GoClient.writePacket(packet)
-            }
-            self.readPackets(generation: generation)
-        }
-    }
-
-    private func protocolFamily(for packet: Data) -> Int32 {
-        guard let first = packet.first else { return AF_INET }
-        return (first >> 4) == 6 ? AF_INET6 : AF_INET
     }
 
     // MARK: Network settings
