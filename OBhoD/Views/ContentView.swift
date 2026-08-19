@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
     @EnvironmentObject var profilesStore: ProfilesStore
+    @StateObject private var captchaBridge = CaptchaBridge.shared
     @State private var selectedTab = 0
 
     var body: some View {
@@ -29,6 +30,12 @@ struct ContentView: View {
                 .tag(2)
         }
         .accentColor(.orange)
+        .onAppear {
+            captchaBridge.start()
+        }
+        .sheet(item: $captchaBridge.pendingRequest) { request in
+            CaptchaChallengeView(request: request)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .didReceiveSubscriptionURL)) { note in
             if let url = note.object as? URL {
                 selectedTab = 0
