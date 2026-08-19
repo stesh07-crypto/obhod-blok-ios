@@ -5,6 +5,8 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // Profile holds consistent browser fingerprint headers for TLS+HTTP requests.
@@ -23,12 +25,30 @@ type SavedProfile struct {
 }
 
 const (
-	profileFile         = "vk_profile.json"
+	profileFile          = "vk_profile.json"
 	captchaBrowserFpFile = "captcha_browser_fp"
 )
 
+func profileStorageDirectory() string {
+	return strings.TrimSpace(os.Getenv("WDTT_STORAGE_DIR"))
+}
+
+func profileStoragePath(name string) string {
+	if dir := profileStorageDirectory(); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	return name
+}
+
+func ensureProfileStorageDirectory() error {
+	if dir := profileStorageDirectory(); dir != "" {
+		return os.MkdirAll(dir, 0700)
+	}
+	return nil
+}
+
 func LoadProfileFromDisk() (*SavedProfile, error) {
-	data, err := os.ReadFile(profileFile)
+	data, err := os.ReadFile(profileStoragePath(profileFile))
 	if err != nil {
 		return nil, err
 	}
@@ -60,10 +80,13 @@ func rotateCaptchaProfile() (*SavedProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(profileFile, data, 0644); err != nil {
+	if err := ensureProfileStorageDirectory(); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(captchaBrowserFpFile, []byte(fp), 0644); err != nil {
+	if err := os.WriteFile(profileStoragePath(profileFile), data, 0600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(profileStoragePath(captchaBrowserFpFile), []byte(fp), 0600); err != nil {
 		return nil, err
 	}
 	log.Printf("[КАПЧА] captcha profile rotated (fp=%s...)", fp[:8])
