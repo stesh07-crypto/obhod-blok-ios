@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - Network configuration received from the Go bootstrap
 
@@ -90,6 +91,17 @@ enum GoClient {
         obfsMode: String,
         vkAnonPath: String
     ) -> Int32 {
+        // Build 175: embedded Go has no writable process CWD inside a
+        // NetworkExtension. Give it the shared App Group explicitly so VK
+        // identity files and captcha IPC survive the iOS sandbox correctly.
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: AppGroup.identifier
+        ) {
+            setenv("WDTT_STORAGE_DIR", groupURL.path, 1)
+        } else {
+            unsetenv("WDTT_STORAGE_DIR")
+        }
+
         let pPeer = strdup(peer)
         let pHashes = strdup(hashes)
         let pPassword = strdup(password)
