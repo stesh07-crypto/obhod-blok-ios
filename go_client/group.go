@@ -255,7 +255,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
 					}
 				} else if quotaRetry {
-					retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
+					retryDelay = time.Duration(6+rand.Intn(6)) * time.Second
 				}
 				select {
 				case <-time.After(retryDelay):

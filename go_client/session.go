@@ -27,6 +27,7 @@ const (
 	keepaliveByte         = 0xFF // DTLS-level keepalive marker
 	keepaliveInterval     = 15 * time.Second
 	keepaliveStaggerSlots = 2000 // 0..1999 ms deterministic phase spread
+	seatCoolFor           = 1200 * time.Millisecond // VK TURN relay seat retention window (build 430)
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -175,7 +176,13 @@ func RunSession(
 		}
 		return false, fmt.Errorf("TURN Allocate: %w", err)
 	}
-	defer relay.Close()
+	defer func() {
+		relay.Close()
+		select {
+		case <-time.After(seatCoolFor):
+		case <-ctx.Done():
+		}
+	}()
 
 	// Reset error count on successful allocation
 	getStreamCache(creds.CacheStreamID).errorCount.Store(0)

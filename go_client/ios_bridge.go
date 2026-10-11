@@ -76,6 +76,51 @@ type iosRuntime struct {
 	lastReconnect      time.Time
 	networkConfigJSON  string
 	stats              *Stats
+	wgDev              *device.Device
+	wgPeerHex          string
+}
+
+func (rt *iosRuntime) setWireGuard(dev *device.Device, peerHex string) {
+	rt.mu.Lock()
+	rt.wgDev = dev
+	rt.wgPeerHex = peerHex
+	rt.mu.Unlock()
+}
+
+func (rt *iosRuntime) clearWireGuard() {
+	rt.mu.Lock()
+	rt.wgDev = nil
+	rt.wgPeerHex = ""
+	rt.mu.Unlock()
+}
+
+func (rt *iosRuntime) rekeyWireGuard() {
+	rt.mu.Lock()
+	dev := rt.wgDev
+	peerHex := rt.wgPeerHex
+	rt.mu.Unlock()
+
+	if dev == nil || peerHex == "" {
+		return
+	}
+
+	var pk device.NoisePublicKey
+	if err := pk.FromHex(peerHex); err != nil {
+		log.Printf("[WG-WAKE] Ошибка NoisePublicKey: %v", err)
+		return
+	}
+
+	peer := dev.LookupPeer(pk)
+	if peer == nil {
+		log.Printf("[WG-WAKE] Peer не найден в WireGuard для rekey")
+		return
+	}
+
+	log.Printf("[WG-WAKE] iOS wake: сброс ключей WireGuard и немедленный handshake")
+	peer.ExpireCurrentKeypairs()
+	if err := peer.SendHandshakeInitiation(false); err != nil {
+		log.Printf("[WG-WAKE] SendHandshakeInitiation: %v", err)
+	}
 }
 
 func newIOSRuntime() *iosRuntime {
@@ -335,6 +380,7 @@ func WDTT_WaitWireGuardReady(timeoutMilliseconds C.int) C.int {
 
 //export WDTT_NotifyNetworkChange
 func WDTT_NotifyNetworkChange() {
+	RotateVKHttpClients("смена физической сети")
 	rt := currentIOSRuntime()
 	if rt != nil {
 		rt.requestReconnect("смена физической сети")
@@ -345,6 +391,7 @@ func WDTT_NotifyNetworkChange() {
 func WDTT_WakeHealthCheck() {
 	rt := currentIOSRuntime()
 	if rt != nil {
+		rt.rekeyWireGuard()
 		rt.kickHealthCheck()
 	}
 }
@@ -712,7 +759,8 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			}
 
 			finalConf := ensureIOSMTU(rawConf)
-			if _, parseErr := parseWgQuick(finalConf); parseErr != nil {
+			parsedWgCfg, parseErr := parseWgQuick(finalConf)
+			if parseErr != nil {
 				logFn(fmt.Sprintf("[КОНФИГ] Некорректный WireGuard-конфиг: %v", parseErr), true)
 				runCancel()
 				return
@@ -741,6 +789,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			// used defer dev.Close() inside this short-lived goroutine and killed
 			// WireGuard immediately after a successful Up().
 			wgDevice = dev
+			rt.setWireGuard(dev, parsedWgCfg.peerPublicHex)
 			rt.wgReadyOnce.Do(func() { close(rt.wgReady) })
 			logFn("[IOS-TUN] WireGuard поднят и готов к трафику", false)
 
@@ -834,6 +883,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 	disp.Shutdown()
 
 	if wgDevice != nil {
+		rt.clearWireGuard()
 		wgDevice.Close()
 	}
 

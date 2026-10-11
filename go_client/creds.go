@@ -385,6 +385,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to initialize tls_client: %w", err)
 	}
+	registerActiveHttpClient(client)
+	defer unregisterActiveHttpClient(client)
 
 	name := generateName()
 	escapedName := neturl.QueryEscape(name)

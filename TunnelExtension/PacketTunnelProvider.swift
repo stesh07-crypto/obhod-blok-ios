@@ -429,9 +429,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
         defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
         defaults?.set("—", forKey: AppGroup.Keys.physicalNetworkLabel)
-        defaults?.set("Ошибка подключения", forKey: AppGroup.Keys.lastStats)
-        appendLog("[VPN] \(error.localizedDescription)", isError: true)
-        appendLog("[ДИАГ] failStart: generation=\(generation), error=\(error.localizedDescription)", isError: true)
+
+        let isCancelled = (error as? TunnelError) == .cancelled
+        if isCancelled {
+            defaults?.set("Отключено", forKey: AppGroup.Keys.lastStats)
+            appendLog("[VPN] Запуск отменён пользователем", isError: false)
+        } else {
+            defaults?.set("Ошибка подключения", forKey: AppGroup.Keys.lastStats)
+            appendLog("[VPN] \(error.localizedDescription)", isError: true)
+            appendLog("[ДИАГ] failStart: generation=\(generation), error=\(error.localizedDescription)", isError: true)
+        }
         GoClient.clearPacketHandler()
         GoClient.stop()
         finishStart(generation: generation, error: error)

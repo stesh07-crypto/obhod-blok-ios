@@ -146,6 +146,8 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	if err != nil {
 		return "", "", nil, newVKCallsFailure("setup", vkCallsFailureSetup, fmt.Errorf("create tls client: %w", err))
 	}
+	registerActiveHttpClient(client)
+	defer unregisterActiveHttpClient(client)
 
 	log.Printf("[STREAM %d] [VKCalls] Identity - Name: %s | device_id=%s | TLS=Chrome_146 | UA: %s", streamID, name, deviceID, profile.UserAgent)
 
