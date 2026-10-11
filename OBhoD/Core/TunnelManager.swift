@@ -253,10 +253,9 @@ final class TunnelManager: ObservableObject {
             guard isCurrentConnectionGeneration(generation) else { return }
             isConnecting = false
             isRunning = false
-            let isUserCancel = (error as? TunnelError) == .cancelled ||
-                               error.localizedDescription.contains("отменён") ||
-                               error.localizedDescription.contains("cancelled") ||
-                               isDisconnecting
+            let isUserCancel = isDisconnecting ||
+                               error.localizedDescription.localizedCaseInsensitiveContains("отмен") ||
+                               error.localizedDescription.localizedCaseInsensitiveContains("cancel")
             if !isUserCancel {
                 appendLog("Ошибка запуска VPN: \(error.localizedDescription)", isError: true)
             } else {
