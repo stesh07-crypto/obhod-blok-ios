@@ -14,8 +14,11 @@ struct OBhoDLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        Image(systemName: context.state.isConnected ? "shield.fill" : "shield.lefthalf.filled")
-                            .foregroundStyle(Color(red: 0.2, green: 0.85, blue: 0.45))
+                        Image("AppLogo")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 20, height: 20)
+                            .clipShape(Circle())
                         Text("OBhoD")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
@@ -84,22 +87,22 @@ struct OBhoDLiveActivity: Widget {
                     .padding(.top, 4)
                 }
             } compactLeading: {
-                Image(systemName: "shield.fill")
-                    .foregroundStyle(Color(red: 0.2, green: 0.85, blue: 0.45))
+                Image("AppLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 20, height: 20)
+                    .clipShape(Circle())
             } compactTrailing: {
-                if let since = context.state.connectedSince {
-                    Text(since, style: .timer)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color(red: 0.4, green: 0.8, blue: 1.0))
-                        .frame(width: 44, alignment: .trailing)
-                } else {
-                    Text("VPN")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-            } minimal: {
-                Image(systemName: "shield.fill")
+                Text("ВКЛ")
+                    .font(.system(size: 12, weight: .heavy, design: .rounded))
                     .foregroundStyle(Color(red: 0.2, green: 0.85, blue: 0.45))
+                    .padding(.trailing, 2)
+            } minimal: {
+                Image("AppLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 16, height: 16)
+                    .clipShape(Circle())
             }
         }
     }
@@ -127,18 +130,15 @@ struct OBhoDLockScreenBannerView: View {
                 // Верхний ряд: Логотип + Статус + Кнопка «Отключить»
                 HStack(alignment: .center) {
                     HStack(spacing: 8) {
-                        ZStack {
-                            Circle()
-                                .fill(Color(red: 0.12, green: 0.22, blue: 0.45))
-                                .frame(width: 34, height: 34)
-                            Image(systemName: context.state.isConnected ? "shield.fill" : "shield.lefthalf.filled")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(
-                                    context.state.isConnected ?
-                                        Color(red: 0.2, green: 0.85, blue: 0.45) :
-                                        Color(red: 1.0, green: 0.75, blue: 0.0)
-                                )
-                        }
+                        Image("AppLogo")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 34, height: 34)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("OBhoD")
