@@ -22,7 +22,7 @@ def extract_and_sanitize_entitlements(prov_path):
     pl = plistlib.loads(plist_data)
     ent = pl.get('Entitlements', {})
     
-    # iOS only supports packet-tunnel-provider for packet tunnels (not hotspot-provider or relay)
+    # iOS only supports packet-tunnel-provider for packet tunnels
     if 'com.apple.developer.networking.networkextension' in ent:
         ent['com.apple.developer.networking.networkextension'] = ['packet-tunnel-provider']
     return ent
@@ -93,6 +93,7 @@ def main():
 
     app_dir = os.path.join(work_dir, 'Payload', 'OBhoD.app')
     ext_dir = os.path.join(app_dir, 'PlugIns', 'TunnelExtension.appex')
+    wgt_dir = os.path.join(app_dir, 'PlugIns', 'OBhoDWidget.appex')
     identity = 'Apple Distribution: Sergei Bokarev (4Z5K8Y686M)'
     keychain = os.environ.get('KEYCHAIN_PATH')
 
@@ -110,16 +111,25 @@ def main():
     if os.path.exists(ext_dir):
         ext_prov = os.path.join(ext_dir, 'embedded.mobileprovision')
         if not os.path.exists(ext_prov):
-            ext_prov = 'keys/OBhod_ext.mobileprovision'
+            ext_prov = 'provisioning/OBhod_ext.mobileprovision'
         ext_ent = extract_and_sanitize_entitlements(ext_prov)
         if ext_ent:
             sign_item(ext_dir, ext_ent, identity, keychain)
 
-    # 2. Sign Main App
+    # 2. Sign Widget
+    if os.path.exists(wgt_dir):
+        wgt_prov = os.path.join(wgt_dir, 'embedded.mobileprovision')
+        if not os.path.exists(wgt_prov):
+            wgt_prov = 'provisioning/OBhod_widget.mobileprovision'
+        wgt_ent = extract_and_sanitize_entitlements(wgt_prov)
+        if wgt_ent:
+            sign_item(wgt_dir, wgt_ent, identity, keychain)
+
+    # 3. Sign Main App
     if os.path.exists(app_dir):
         app_prov = os.path.join(app_dir, 'embedded.mobileprovision')
         if not os.path.exists(app_prov):
-            app_prov = 'keys/OBhod_app.mobileprovision'
+            app_prov = 'provisioning/OBhod_app.mobileprovision'
         app_ent = extract_and_sanitize_entitlements(app_prov)
         if app_ent:
             sign_item(app_dir, app_ent, identity, keychain)
@@ -130,6 +140,10 @@ def main():
     if os.path.exists(ext_dir):
         print('=== VERIFYING CODESIGN OF EXTENSION ===')
         subprocess.run(['codesign', '-d', '--entitlements', ':-', ext_dir])
+
+    if os.path.exists(wgt_dir):
+        print('=== VERIFYING CODESIGN OF WIDGET ===')
+        subprocess.run(['codesign', '-d', '--entitlements', ':-', wgt_dir])
 
     os.remove(ipa_path)
     with zipfile.ZipFile(ipa_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:

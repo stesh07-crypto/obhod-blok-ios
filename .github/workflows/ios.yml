@@ -325,7 +325,7 @@ jobs:
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
           IPA_PATH: ${{ env.IPA_PATH }}
         run: |
-          python3 scripts/upload_testflight.py
+          python3 scripts/upload_to_testflight.py
 
 
       - name: Cleanup keychain

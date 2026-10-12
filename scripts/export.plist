@@ -22,8 +22,8 @@
         <string>OBhod_app</string>
         <key>net.qwdtt.client.ios.tunnel</key>
         <string>OBhod_ext</string>
-        <key>net.qwdtt.client.ios.liveactivity</key>
-        <string>OBhod_live</string>
+        <key>net.qwdtt.client.ios.widget</key>
+        <string>OBhod_widget</string>
     </dict>
 </dict>
 </plist>
