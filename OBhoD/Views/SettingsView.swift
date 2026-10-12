@@ -46,6 +46,14 @@ struct SettingsView: View {
                     Toggle("Подробные логи", isOn: $settings.detailedLogs)
                 }
 
+                // ── Live Activity (Эфир активности) ─────────────────────
+                Section(
+                    header: Text("📲 Экран блокировки"),
+                    footer: Text("Отображение виджета с таймером и кнопкой отключения на экране блокировки и в шторке.")
+                ) {
+                    Toggle("Эфир активности", isOn: $settings.liveActivityEnabled)
+                }
+
                 // ── Bot Profile Link ──────────────────────────────────────
                 Section(
                     header: Text("⚡ Профиль и бот"),

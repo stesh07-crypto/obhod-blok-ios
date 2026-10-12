@@ -209,6 +209,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         GoClient.setStatsHandler { [weak self] stats in
             self?.defaults?.set(stats, forKey: AppGroup.Keys.lastStats)
+            if self?.defaults?.bool(forKey: "request_disconnect") == true {
+                self?.defaults?.removeObject(forKey: "request_disconnect")
+                self?.appendLog("[VPN] Остановка по запросу из виджета/Live Activity", isError: false)
+                self?.cancelTunnelWithError(nil)
+            }
         }
     }
 

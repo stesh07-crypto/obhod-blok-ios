@@ -1,4 +1,4 @@
-﻿import ActivityKit
+import ActivityKit
 import SwiftUI
 import WidgetKit
 
@@ -49,18 +49,35 @@ struct OBhoDLiveActivity: Widget {
 
                         Spacer()
 
-                        Link(destination: URL(string: "obhod://disconnect")!) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "power")
-                                    .font(.system(size: 10, weight: .bold))
-                                Text("Отключить")
-                                    .font(.system(size: 12, weight: .semibold))
+                        if #available(iOS 17.0, *) {
+                            Button(intent: DisconnectVPNIntent()) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "power")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("Отключить")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color(red: 0.85, green: 0.22, blue: 0.22))
+                                .foregroundStyle(.white)
+                                .clipShape(Capsule())
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color(red: 0.85, green: 0.22, blue: 0.22))
-                            .foregroundStyle(.white)
-                            .clipShape(Capsule())
+                            .buttonStyle(.plain)
+                        } else {
+                            Link(destination: URL(string: "obhod://disconnect")!) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "power")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("Отключить")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color(red: 0.85, green: 0.22, blue: 0.22))
+                                .foregroundStyle(.white)
+                                .clipShape(Capsule())
+                            }
                         }
                     }
                     .padding(.horizontal, 6)
@@ -150,29 +167,56 @@ struct OBhoDLockScreenBannerView: View {
 
                     Spacer()
 
-                    // Фирменная кнопка «Отключить»
-                    Link(destination: URL(string: "obhod://disconnect")!) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "power")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("Отключить")
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.90, green: 0.24, blue: 0.24),
-                                    Color(red: 0.75, green: 0.15, blue: 0.15)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
+                    // Фирменная кнопка «Отключить» (работает в фоне без открытия приложения на iOS 17+)
+                    if #available(iOS 17.0, *) {
+                        Button(intent: DisconnectVPNIntent()) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "power")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("Отключить")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.90, green: 0.24, blue: 0.24),
+                                        Color(red: 0.75, green: 0.15, blue: 0.15)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                        .foregroundStyle(.white)
-                        .clipShape(Capsule())
-                        .shadow(color: Color.red.opacity(0.35), radius: 4, x: 0, y: 2)
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                            .shadow(color: Color.red.opacity(0.35), radius: 4, x: 0, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Link(destination: URL(string: "obhod://disconnect")!) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "power")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("Отключить")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.90, green: 0.24, blue: 0.24),
+                                        Color(red: 0.75, green: 0.15, blue: 0.15)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                            .shadow(color: Color.red.opacity(0.35), radius: 4, x: 0, y: 2)
+                        }
                     }
                 }
 
@@ -181,7 +225,7 @@ struct OBhoDLockScreenBannerView: View {
                     .fill(Color.white.opacity(0.12))
                     .frame(height: 1)
 
-                // Нижний ряд: Таймер текущей сессии + Защита
+                // Нижний ряд: Таймер текущей сессии + Скорость скачивания
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("ВРЕМЯ СЕССИИ")
@@ -201,20 +245,19 @@ struct OBhoDLockScreenBannerView: View {
 
                     Spacer()
 
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("ШЛЮЗ")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.white.opacity(0.55))
-
-                        HStack(spacing: 4) {
-                            Image(systemName: "lock.shield.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color(red: 0.35, green: 0.75, blue: 1.0))
-                            Text("VK Звонки")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.95))
-                        }
+                    // Скорость скачивания без названия
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Color(red: 0.35, green: 0.75, blue: 1.0))
+                        Text(context.state.downloadSpeed.isEmpty ? "0 КБ/с" : context.state.downloadSpeed)
+                            .font(.system(size: 17, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
             .padding(16)

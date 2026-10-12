@@ -1,4 +1,4 @@
-﻿import Foundation
+import Foundation
 import UIKit
 #if canImport(ActivityKit)
 import ActivityKit
@@ -15,13 +15,14 @@ final class OBhoDLiveActivityManager {
         currentActivity = Activity<OBhoDActivityAttributes>.activities.first
     }
 
-    func sync(isConnected: Bool, statusText: String, connectedSince: Date?) {
+    func sync(isConnected: Bool, statusText: String, connectedSince: Date?, downloadSpeed: String = "") {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
         let state = OBhoDActivityAttributes.ContentState(
             statusText: statusText,
             isConnected: isConnected,
-            connectedSince: connectedSince
+            connectedSince: connectedSince,
+            downloadSpeed: downloadSpeed
         )
 
         if let activity = currentActivity {
@@ -65,7 +66,8 @@ final class OBhoDLiveActivityManager {
             let endState = OBhoDActivityAttributes.ContentState(
                 statusText: "Отключено",
                 isConnected: false,
-                connectedSince: nil
+                connectedSince: nil,
+                downloadSpeed: ""
             )
             if #available(iOS 16.2, *) {
                 await activity.end(ActivityContent(state: endState, staleDate: nil), dismissalPolicy: .immediate)
@@ -79,14 +81,15 @@ final class OBhoDLiveActivityManager {
 
 /// Safe bridge callable from anywhere regardless of iOS version
 enum LiveActivityBridge {
-    static func sync(isConnected: Bool, statusText: String, connectedSince: Date?) {
+    static func sync(isConnected: Bool, statusText: String, connectedSince: Date?, downloadSpeed: String = "") {
         #if canImport(ActivityKit)
         if #available(iOS 16.1, *) {
             Task { @MainActor in
                 OBhoDLiveActivityManager.shared.sync(
                     isConnected: isConnected,
                     statusText: statusText,
-                    connectedSince: connectedSince
+                    connectedSince: connectedSince,
+                    downloadSpeed: downloadSpeed
                 )
             }
         }

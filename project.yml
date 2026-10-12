@@ -37,6 +37,7 @@ targets:
         excludes:
           - '**/*.md'
           - 'Core/GoClient.swift'
+      - path: OBhoDWidget/DisconnectVPNIntent.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios

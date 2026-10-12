@@ -57,6 +57,11 @@ final class TunnelManager: ObservableObject {
     @Published var activeConnections = 0
     @Published var uploadedBytes: Int64 = 0
     @Published var downloadedBytes: Int64 = 0
+    @Published var currentDownloadSpeed: String = "0 КБ/с"
+
+    private var lastSpeedCheckDate: Date?
+    private var lastSpeedCheckBytes: Int64 = 0
+    private var lastLiveActivitySync: Date?
 
     private var isDisconnecting = false
     private var connectionGeneration: UInt64 = 0
@@ -356,20 +361,45 @@ final class TunnelManager: ObservableObject {
         defaults.set(Date().timeIntervalSince1970, forKey: AppGroup.Keys.widgetUpdatedAt)
         WidgetKit.WidgetCenter.shared.reloadTimelines(ofKind: "OBhoDWidget")
 
+        syncLiveActivity(status: status)
+    }
+
+    private func syncLiveActivity(status: String) {
+        guard SettingsStore.shared.liveActivityEnabled else {
+            LiveActivityBridge.end()
+            return
+        }
+
         if status == "connected" {
             LiveActivityBridge.sync(
                 isConnected: true,
                 statusText: "Подключено",
-                connectedSince: connectedSince ?? Date()
+                connectedSince: connectedSince ?? Date(),
+                downloadSpeed: currentDownloadSpeed
             )
         } else if status == "connecting" {
             LiveActivityBridge.sync(
                 isConnected: false,
                 statusText: "Подключение…",
-                connectedSince: nil
+                connectedSince: nil,
+                downloadSpeed: ""
             )
         } else {
+            lastLiveActivitySync = nil
+            currentDownloadSpeed = "0 КБ/с"
+            lastSpeedCheckDate = nil
+            lastSpeedCheckBytes = 0
             LiveActivityBridge.end()
+        }
+    }
+
+    private func formatSpeed(_ bytesPerSec: Double) -> String {
+        if bytesPerSec >= 1024 * 1024 {
+            return String(format: "%.1f МБ/с", bytesPerSec / (1024.0 * 1024.0))
+        } else if bytesPerSec >= 1024 {
+            return String(format: "%.0f КБ/с", bytesPerSec / 1024.0)
+        } else {
+            return "0 КБ/с"
         }
     }
 
@@ -463,10 +493,35 @@ final class TunnelManager: ObservableObject {
     private func applyLiveStats(_ raw: String) {
         if let data = raw.data(using: .utf8),
            let payload = try? JSONDecoder().decode(TunnelLiveStatsPayload.self, from: data) {
+            let now = Date()
+            let newDownloadBytes = max(0, payload.downloadBytes)
+
+            if let lastDate = lastSpeedCheckDate {
+                let interval = now.timeIntervalSince(lastDate)
+                if interval >= 0.8 {
+                    let diff = max(0, newDownloadBytes - lastSpeedCheckBytes)
+                    let bytesPerSec = Double(diff) / interval
+                    currentDownloadSpeed = formatSpeed(bytesPerSec)
+                    lastSpeedCheckDate = now
+                    lastSpeedCheckBytes = newDownloadBytes
+                }
+            } else {
+                lastSpeedCheckDate = now
+                lastSpeedCheckBytes = newDownloadBytes
+                currentDownloadSpeed = "0 КБ/с"
+            }
+
             activeConnections = max(0, payload.activeConnections)
             uploadedBytes = max(0, payload.uploadBytes)
-            downloadedBytes = max(0, payload.downloadBytes)
+            downloadedBytes = newDownloadBytes
             stats = "Активных: \(activeConnections) • ↓ \(downloadedMBString) • ↑ \(uploadedMBString)"
+
+            if isRunning {
+                if lastLiveActivitySync == nil || now.timeIntervalSince(lastLiveActivitySync!) >= 1.5 {
+                    lastLiveActivitySync = now
+                    syncLiveActivity(status: "connected")
+                }
+            }
             return
         }
 

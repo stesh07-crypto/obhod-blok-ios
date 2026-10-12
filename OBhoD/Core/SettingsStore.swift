@@ -25,6 +25,14 @@ final class SettingsStore: ObservableObject {
     @Published var autoReconnect: Bool {
         didSet { defaults.set(autoReconnect, forKey: "auto_reconnect") }
     }
+    @Published var liveActivityEnabled: Bool {
+        didSet {
+            defaults.set(liveActivityEnabled, forKey: "live_activity_enabled")
+            if !liveActivityEnabled {
+                LiveActivityBridge.end()
+            }
+        }
+    }
 
     private init() {
         goDnsMode     = defaults.string(forKey: "go_dns_mode") ?? "cloudflare"
@@ -32,6 +40,7 @@ final class SettingsStore: ObservableObject {
         vkAnonPath    = defaults.string(forKey: "vk_anon_path") ?? "/voice/join"
         detailedLogs  = defaults.bool(forKey: "detailed_logs")
         autoReconnect = defaults.object(forKey: "auto_reconnect") == nil ? true : defaults.bool(forKey: "auto_reconnect")
+        liveActivityEnabled = defaults.object(forKey: "live_activity_enabled") == nil ? true : defaults.bool(forKey: "live_activity_enabled")
         AppGroup.sharedDefaults?.set(detailedLogs, forKey: AppGroup.Keys.detailedLogs)
     }
 

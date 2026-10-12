@@ -1,4 +1,4 @@
-﻿import Foundation
+import Foundation
 #if canImport(ActivityKit)
 import ActivityKit
 
@@ -8,11 +8,13 @@ public struct OBhoDActivityAttributes: ActivityAttributes {
         public var statusText: String
         public var isConnected: Bool
         public var connectedSince: Date?
+        public var downloadSpeed: String
 
-        public init(statusText: String, isConnected: Bool, connectedSince: Date?) {
+        public init(statusText: String, isConnected: Bool, connectedSince: Date?, downloadSpeed: String = "") {
             self.statusText = statusText
             self.isConnected = isConnected
             self.connectedSince = connectedSince
+            self.downloadSpeed = downloadSpeed
         }
     }
 
