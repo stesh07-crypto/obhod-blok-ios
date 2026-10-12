@@ -57,6 +57,7 @@ targets:
           CODE_SIGN_ENTITLEMENTS: OBhoD/App/OBhoD.entitlements
     dependencies:
       - target: TunnelExtension
+      - target: OBhoDWidget
     entitlements:
       path: OBhoD/App/OBhoD.entitlements
 
@@ -94,3 +95,32 @@ targets:
         embed: false
     entitlements:
       path: TunnelExtension/TunnelExtension.entitlements
+
+  # ── WidgetKit Extension ────────────────────────────────────────────────────
+  # Home Screen (systemSmall) + Lock Screen accessories (iOS 16+)
+  # Reads tunnel status from shared App Group UserDefaults — no code in Extension needed.
+  OBhoDWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: '16.0'
+    sources:
+      - path: OBhoDWidget
+        excludes:
+          - '**/*.md'
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios.widget
+        PRODUCT_NAME: OBhoDWidget
+        INFOPLIST_FILE: OBhoDWidget/Info.plist
+        CODE_SIGN_ENTITLEMENTS: OBhoDWidget/OBhoDWidget.entitlements
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: Apple Distribution
+        PROVISIONING_PROFILE_SPECIFIER: OBhod_widget
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: OBhod_widget
+          CODE_SIGN_ENTITLEMENTS: OBhoDWidget/OBhoDWidget.entitlements
+    entitlements:
+      path: OBhoDWidget/OBhoDWidget.entitlements

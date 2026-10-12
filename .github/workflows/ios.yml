@@ -63,6 +63,7 @@ jobs:
           echo "Setting CFBundleVersion to ${{ github.run_number }}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "OBhoD/App/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "TunnelExtension/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "OBhoDWidget/Info.plist" || true
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -190,9 +191,16 @@ jobs:
             "
           fi
 
-          # 3. Copy by UUID (required by Xcode codesign)
+          # 3. Widget Profile (from repository)
+          if [ -f "provisioning/OBhod_widget.mobileprovision" ]; then
+            cp -f "provisioning/OBhod_widget.mobileprovision" "$PP_DIR/widget_raw.mobileprovision"
+            echo "Used provisioning/OBhod_widget.mobileprovision from repository"
+          fi
+
+          # 4. Copy by UUID (required by Xcode codesign)
           APP_UUID=$(security cms -D -i "$PP_DIR/app_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
           EXT_UUID=$(security cms -D -i "$PP_DIR/ext_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
+          WGT_UUID=$(security cms -D -i "$PP_DIR/widget_raw.mobileprovision" 2>/dev/null | grep -A1 '<key>UUID</key>' | grep -oE '[a-f0-9-]{36}' | head -1)
 
           if [ -n "$APP_UUID" ]; then
             cp -f "$PP_DIR/app_raw.mobileprovision" "$PP_DIR/${APP_UUID}.mobileprovision"
@@ -201,6 +209,10 @@ jobs:
           if [ -n "$EXT_UUID" ]; then
             cp -f "$PP_DIR/ext_raw.mobileprovision" "$PP_DIR/${EXT_UUID}.mobileprovision"
             echo "Installed Ext profile UUID: $EXT_UUID"
+          fi
+          if [ -n "$WGT_UUID" ]; then
+            cp -f "$PP_DIR/widget_raw.mobileprovision" "$PP_DIR/${WGT_UUID}.mobileprovision"
+            echo "Installed Widget profile UUID: $WGT_UUID"
           fi
 
           echo "=== APP PROVISIONING PROFILE ENTITLEMENTS (PlistBuddy) ==="
@@ -234,6 +246,7 @@ jobs:
           echo "=== RE-SIGNING ARCHIVE WITH EXPLICIT ENTITLEMENTS ==="
           APP_DIR="$RUNNER_TEMP/OBhoD.xcarchive/Products/Applications/OBhoD.app"
           EXT_DIR="$APP_DIR/PlugIns/TunnelExtension.appex"
+          WGT_DIR="$APP_DIR/PlugIns/OBhoDWidget.appex"
 
           # 1. Sign Extension with TunnelExtension.entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
@@ -242,7 +255,17 @@ jobs:
             --keychain "$RUNNER_TEMP/signing.keychain-db" \
             "$EXT_DIR"
 
-          # 2. Sign Main App with OBhoD.entitlements
+          # 2. Sign Widget with OBhoDWidget.entitlements
+          if [ -d "$WGT_DIR" ]; then
+            codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
+              --entitlements "OBhoDWidget/OBhoDWidget.entitlements" \
+              --generate-entitlement-der \
+              --keychain "$RUNNER_TEMP/signing.keychain-db" \
+              "$WGT_DIR"
+            echo "Widget signed OK"
+          fi
+
+          # 3. Sign Main App with OBhoD.entitlements
           codesign --force --sign "Apple Distribution: Sergei Bokarev (4Z5K8Y686M)" \
             --entitlements "OBhoD/App/OBhoD.entitlements" \
             --generate-entitlement-der \
@@ -253,6 +276,10 @@ jobs:
           codesign -d --entitlements :- "$APP_DIR" || true
           echo "=== ARCHIVED EXTENSION ENTITLEMENTS VERIFICATION ==="
           codesign -d --entitlements :- "$EXT_DIR" || true
+          if [ -d "$WGT_DIR" ]; then
+            echo "=== ARCHIVED WIDGET ENTITLEMENTS VERIFICATION ==="
+            codesign -d --entitlements :- "$WGT_DIR" || true
+          fi
 
       - name: Export IPA
         run: |

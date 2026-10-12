@@ -25,6 +25,10 @@ enum AppGroup {
         static let obfsMode     = "obfsMode"
         static let vkAnonPath   = "vkAnonPath"
         static let detailedLogs = "detailedLogs"
+
+        // Widget keys — read by OBhoDWidget WidgetKit extension
+        static let widgetStatus    = "tunnel_status"          // "connected" | "connecting" | "disconnected"
+        static let widgetUpdatedAt = "tunnel_status_updated"  // TimeInterval since 1970
     }
 
     static var sharedDefaults: UserDefaults? {

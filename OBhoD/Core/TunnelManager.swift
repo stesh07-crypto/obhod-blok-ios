@@ -2,6 +2,7 @@ import Foundation
 import NetworkExtension
 import Combine
 import UIKit
+import WidgetKit
 
 // MARK: - Log Entry
 
@@ -299,6 +300,7 @@ final class TunnelManager: ObservableObject {
             if stats == "Подключение…" || stats == "Переподключение…" || stats == "Отключение…" {
                 stats = "Подключено"
             }
+            writeWidgetStatus("connected")
 
         case .connecting:
             isRunning = false
@@ -307,6 +309,7 @@ final class TunnelManager: ObservableObject {
             if stats != "Переподключение…" {
                 stats = "Подключение…"
             }
+            writeWidgetStatus("connecting")
 
         case .reasserting:
             isRunning = false
@@ -314,6 +317,7 @@ final class TunnelManager: ObservableObject {
             isDisconnecting = false
             isTransportRecovering = true
             stats = "Переподключение…"
+            writeWidgetStatus("connecting")
 
         case .disconnecting:
             isRunning = false
@@ -321,12 +325,14 @@ final class TunnelManager: ObservableObject {
             isDisconnecting = true
             isTransportRecovering = false
             stats = "Отключение…"
+            writeWidgetStatus("disconnected")
 
         case .disconnected, .invalid:
             let wasEstablished = connectedSince != nil
             let wasManualStop = isDisconnecting
             let recoveryAlreadyInProgress = autoReconnectAttempts > 0
             resetDisconnectedState()
+            writeWidgetStatus("disconnected")
 
             // Normal TURN failures are repaired inside TunnelExtension. This is
             // a second safety net for a real extension exit/crash while the app
@@ -341,6 +347,15 @@ final class TunnelManager: ObservableObject {
             break
         }
     }
+
+    /// Writes the current tunnel status string into the shared App Group so the
+    /// WidgetKit extension can reflect it on the Home Screen / Lock Screen widget.
+    private func writeWidgetStatus(_ status: String) {
+        defaults.set(status, forKey: AppGroup.Keys.widgetStatus)
+        defaults.set(Date().timeIntervalSince1970, forKey: AppGroup.Keys.widgetUpdatedAt)
+        WidgetKit.WidgetCenter.shared.reloadTimelines(ofKind: "OBhoDWidget")
+    }
+
 
     private func scheduleAutoReconnect() {
         guard autoReconnectTask == nil, autoReconnectAttempts < 3 else { return }
