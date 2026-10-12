@@ -349,11 +349,28 @@ final class TunnelManager: ObservableObject {
     }
 
     /// Writes the current tunnel status string into the shared App Group so the
-    /// WidgetKit extension can reflect it on the Home Screen / Lock Screen widget.
+    /// WidgetKit extension can reflect it on the Home Screen / Lock Screen widget,
+    /// and synchronizes the iOS Lock Screen Live Activity banner.
     private func writeWidgetStatus(_ status: String) {
         defaults.set(status, forKey: AppGroup.Keys.widgetStatus)
         defaults.set(Date().timeIntervalSince1970, forKey: AppGroup.Keys.widgetUpdatedAt)
         WidgetKit.WidgetCenter.shared.reloadTimelines(ofKind: "OBhoDWidget")
+
+        if status == "connected" {
+            LiveActivityBridge.sync(
+                isConnected: true,
+                statusText: "Подключено",
+                connectedSince: connectedSince ?? Date()
+            )
+        } else if status == "connecting" {
+            LiveActivityBridge.sync(
+                isConnected: false,
+                statusText: "Подключение…",
+                connectedSince: nil
+            )
+        } else {
+            LiveActivityBridge.end()
+        }
     }
 
 

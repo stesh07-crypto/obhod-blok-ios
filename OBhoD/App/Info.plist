@@ -22,7 +22,7 @@
     <string>130</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
-    <!-- URL Schemes: qwdtt:// -->
+    <!-- URL Schemes: qwdtt:// and obhod:// -->
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -31,9 +31,15 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>qwdtt</string>
+                <string>obhod</string>
             </array>
         </dict>
     </array>
+
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <key>NSSupportsLiveActivitiesFrequentUpdates</key>
+    <true/>
 
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>

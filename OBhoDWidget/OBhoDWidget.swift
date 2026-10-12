@@ -1,7 +1,7 @@
 ﻿import WidgetKit
 import SwiftUI
 
-// MARK: - Shared App Group key (must match AppGroup.swift in main app)
+// MARK: - Shared App Group Keys
 private let kAppGroupID = "group.net.qwdtt.client.ios"
 private let kStatusKey  = "tunnel_status"         // "connected" | "disconnected" | "connecting"
 private let kUpdatedKey = "tunnel_status_updated"  // TimeInterval
@@ -37,7 +37,7 @@ enum TunnelStatus: String {
 
     var color: Color {
         switch self {
-        case .connected:    return Color(red: 0.18, green: 0.80, blue: 0.44)
+        case .connected:    return Color(red: 0.20, green: 0.85, blue: 0.45)
         case .connecting:   return Color(red: 1.0,  green: 0.75, blue: 0.0)
         case .disconnected: return Color(red: 0.55, green: 0.55, blue: 0.60)
         }
@@ -47,7 +47,6 @@ enum TunnelStatus: String {
 // MARK: - Timeline Provider
 
 struct OBhoDProvider: TimelineProvider {
-
     private var defaults: UserDefaults? {
         UserDefaults(suiteName: kAppGroupID)
     }
@@ -75,23 +74,30 @@ struct OBhoDProvider: TimelineProvider {
     }
 }
 
-// MARK: - Views
+// MARK: - Widget Views
 
 struct OBhoDSmallView: View {
     let entry: OBhoDEntry
     var body: some View {
         ZStack {
-            ContainerRelativeShape()
-                .fill(Color(red: 0.08, green: 0.09, blue: 0.12))
+            LinearGradient(
+                colors: [
+                    Color(red: 0.06, green: 0.12, blue: 0.26),
+                    Color(red: 0.03, green: 0.07, blue: 0.16)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
             VStack(spacing: 6) {
                 Image(systemName: entry.status.icon)
                     .font(.system(size: 32, weight: .semibold))
                     .foregroundStyle(entry.status.color)
                 Text("OBhoD")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
                 Text(entry.status.label)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(entry.status.color)
             }
             .padding(8)
@@ -139,34 +145,64 @@ struct OBhoDInlineView: View {
 struct OBhoDWidgetEntryView: View {
     @Environment(\.widgetFamily) var family
     let entry: OBhoDEntry
+
     var body: some View {
+        entryContent
+            .applyWidgetContainerBackground()
+    }
+
+    @ViewBuilder
+    private var entryContent: some View {
         switch family {
-        case .systemSmall:         OBhoDSmallView(entry: entry)
-        case .accessoryCircular:   OBhoDCircularView(entry: entry)
+        case .systemSmall:          OBhoDSmallView(entry: entry)
+        case .accessoryCircular:    OBhoDCircularView(entry: entry)
         case .accessoryRectangular: OBhoDRectangularView(entry: entry)
-        case .accessoryInline:     OBhoDInlineView(entry: entry)
-        default:                   OBhoDSmallView(entry: entry)
+        case .accessoryInline:      OBhoDInlineView(entry: entry)
+        default:                    OBhoDSmallView(entry: entry)
         }
     }
 }
 
-// MARK: - Widget
+// MARK: - Compatibility Background Modifier (iOS 16 & iOS 17+)
 
-@main
+extension View {
+    @ViewBuilder
+    func applyWidgetContainerBackground() -> some View {
+        if #available(iOS 17.0, *) {
+            self.containerBackground(Color(red: 0.05, green: 0.10, blue: 0.22), for: .widget)
+        } else {
+            self.background(Color(red: 0.05, green: 0.10, blue: 0.22))
+        }
+    }
+}
+
+// MARK: - Widget Declaration
+
 struct OBhoDWidget: Widget {
     let kind = "OBhoDWidget"
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: OBhoDProvider()) { entry in
             OBhoDWidgetEntryView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("OBhoD")
-        .description("Статус VK-туннеля")
+        .description("Статус туннеля OBhoD")
         .supportedFamilies([
             .systemSmall,
             .accessoryCircular,
             .accessoryRectangular,
             .accessoryInline
         ])
+    }
+}
+
+// MARK: - Widget Bundle (Live Activity + Regular Widgets)
+
+@main
+struct OBhoDWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        OBhoDWidget()
+        if #available(iOS 16.1, *) {
+            OBhoDLiveActivity()
+        }
     }
 }

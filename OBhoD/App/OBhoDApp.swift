@@ -79,6 +79,12 @@ private enum DeepLinkRouter {
         lastHandledURL = absolute
         lastHandledAt = now
 
+        // Disconnect action from Live Activity / Widget button in Notification Center
+        if url.host == "disconnect" || absolute.contains("disconnect") {
+            TunnelManager.shared.disconnect()
+            return
+        }
+
         // Bot universal link: https://test-36.ru/import?url=<subscription>
         if absolute.contains("test-36.ru/import"),
            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),

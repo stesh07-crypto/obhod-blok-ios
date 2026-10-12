@@ -102,11 +102,12 @@ targets:
   OBhoDWidget:
     type: app-extension
     platform: iOS
-    deploymentTarget: '16.0'
+    deploymentTarget: '16.1'
     sources:
       - path: OBhoDWidget
         excludes:
           - '**/*.md'
+      - path: OBhoD/Core/OBhoDActivityAttributes.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.qwdtt.client.ios.widget
