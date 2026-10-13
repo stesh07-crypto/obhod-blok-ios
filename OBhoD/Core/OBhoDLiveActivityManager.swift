@@ -60,9 +60,11 @@ final class OBhoDLiveActivityManager {
         guard isConnected || statusText.contains("Подключ") else { return }
 
         // Clean up any stale ended/dismissed activities in background
-        for old in Activity<OBhoDActivityAttributes>.activities where old.activityState != .active {
-            Task {
-                await old.end(nil, dismissalPolicy: .immediate)
+        if #available(iOS 16.2, *) {
+            for old in Activity<OBhoDActivityAttributes>.activities where old.activityState != .active {
+                Task {
+                    await old.end(nil, dismissalPolicy: .immediate)
+                }
             }
         }
 
@@ -105,7 +107,7 @@ final class OBhoDLiveActivityManager {
                 if #available(iOS 16.2, *) {
                     await act.end(ActivityContent(state: endState, staleDate: nil), dismissalPolicy: .immediate)
                 } else {
-                    await act.end(using: endState, dismissalPolicy: .immediate)
+                    await act.end(using: endState)
                 }
             }
         }
