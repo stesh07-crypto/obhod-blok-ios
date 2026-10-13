@@ -93,9 +93,13 @@ struct OBhoDLiveActivity: Widget {
                     .frame(width: 20, height: 20)
                     .clipShape(Circle())
             } compactTrailing: {
-                Text("ВКЛ")
-                    .font(.system(size: 12, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color(red: 0.2, green: 0.85, blue: 0.45))
+                Text(context.state.isConnected ? "ВКЛ" : "•••")
+                    .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    .foregroundStyle(
+                        context.state.isConnected ?
+                            Color(red: 0.2, green: 0.85, blue: 0.45) :
+                            Color(red: 1.0, green: 0.75, blue: 0.0)
+                    )
                     .padding(.trailing, 2)
             } minimal: {
                 Image("AppLogo")
