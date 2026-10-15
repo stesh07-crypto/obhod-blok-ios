@@ -201,7 +201,7 @@ struct ProfileEditView: View {
                 }
 
                 Section("Параметры соединения") {
-                    TextField("Хэши VK (через запятую)", text: $profile.vkHashes)
+                    TextField("Хэши подключения (через запятую)", text: $profile.vkHashes)
                         .font(.system(size: 13, design: .monospaced))
                     TextField("Пароль", text: $profile.password)
                     Stepper("Потоков на хэш: \(profile.workersPerHash)", value: $profile.workersPerHash, in: 1...64)

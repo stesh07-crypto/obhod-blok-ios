@@ -168,7 +168,7 @@ enum GoClient {
     /// re-evaluate the current transport. A real sustained failure can still
     /// request a transport reconnect; manual reconnect remains explicit.
     static func notifyNetworkChange() {
-        WDTT_WakeHealthCheck()
+        WDTT_NotifyNetworkChange()
     }
 
     /// Rebuild only the current Go transport attempt. The iOS VPN session,

@@ -65,6 +65,7 @@ type iosRuntime struct {
 	activate   chan struct{}
 	wgReady    chan struct{}
 	healthKick chan struct{}
+	reconnectWake chan struct{}
 
 	readyOnce    sync.Once
 	activateOnce sync.Once
@@ -133,6 +134,7 @@ func newIOSRuntime() *iosRuntime {
 		activate:   make(chan struct{}),
 		wgReady:    make(chan struct{}),
 		healthKick: make(chan struct{}, 1),
+		reconnectWake: make(chan struct{}, 1),
 	}
 }
 
@@ -163,7 +165,7 @@ func (rt *iosRuntime) requestReconnect(reason string) bool {
 		rt.mu.Unlock()
 		return false
 	}
-	if !rt.lastReconnect.IsZero() && time.Since(rt.lastReconnect) < 2*time.Second {
+	if !rt.lastReconnect.IsZero() && time.Since(rt.lastReconnect) < 1500*time.Millisecond {
 		rt.mu.Unlock()
 		return false
 	}
@@ -172,11 +174,15 @@ func (rt *iosRuntime) requestReconnect(reason string) bool {
 	cancel := rt.attemptCancel
 	rt.mu.Unlock()
 
-	if cancel == nil {
-		return false
+	select {
+	case rt.reconnectWake <- struct{}{}:
+	default:
 	}
+
 	iosLog(fmt.Sprintf("[СЕТЬ] Перезапуск транспорта: %s", reason), false)
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	return true
 }
 
@@ -571,8 +577,8 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 		// nothing back for a sustained period. Idle/sleep alone is not failure.
 		if !lastTX.IsZero() &&
 			now.Sub(lastTX) <= 45*time.Second &&
-			now.Sub(lastRX) >= 90*time.Second &&
-			up-bytesUpAtLastRX >= 4096 {
+			now.Sub(lastRX) >= 25*time.Second &&
+			up-bytesUpAtLastRX >= 1024 {
 			if rt.requestReconnect("health watchdog: есть TX, но нет RX") {
 				lastRX = now
 				bytesUpAtLastRX = up
@@ -678,6 +684,7 @@ func runTunnelLoop(rt *iosRuntime, params TunnelParams) {
 		select {
 		case <-rt.ctx.Done():
 			return
+		case <-rt.reconnectWake:
 		case <-time.After(delay):
 		}
 	}

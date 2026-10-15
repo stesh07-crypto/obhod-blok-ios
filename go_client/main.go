@@ -80,7 +80,7 @@ func classifyHashCheckError(err error) (string, string) {
 	text := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(text, "captcha_required") || strings.Contains(text, "captcha_wait_required"):
-		return "captcha", "VK просит капчу"
+		return "captcha", "Решите капчу для подключения"
 	case strings.Contains(text, "call not found") ||
 		strings.Contains(text, "joinconversationbylink") ||
 		strings.Contains(text, "missing turn_server") ||

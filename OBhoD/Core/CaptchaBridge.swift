@@ -118,7 +118,7 @@ struct CaptchaChallengeView: View {
                 }
             )
             .ignoresSafeArea(edges: .bottom)
-            .navigationTitle("Проверка VK")
+            .navigationTitle("Решите капчу для подключения")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -204,7 +204,7 @@ private struct CaptchaWebView: UIViewRepresentable {
                 finished = true
                 onSuccess(token)
             case "error":
-                let value = (body["message"] as? String) ?? "VK captcha error"
+                let value = (body["message"] as? String) ?? "Ошибка решения капчи"
                 finished = true
                 onFailure(value)
             default:

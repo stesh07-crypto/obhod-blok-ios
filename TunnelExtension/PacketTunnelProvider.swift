@@ -179,9 +179,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func wake() {
-        appendLog("[VPN] wake: проверка здоровья транспорта", isError: false)
-        appendLog("[ДИАГ] iOS wake: отправлен health-check без teardown", isError: false)
+        appendLog("[VPN] wake: пробуждение устройства, проверяем и восстанавливаем транспорт", isError: false)
         GoClient.wakeHealthCheck()
+
+        workQueue.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true else { return }
+            let accepted = GoClient.requestTransportReconnect()
+            self.appendLog("[СЕТЬ] wake: авто-реконнект транспорта: \(accepted ? "запущен" : "в процессе")", isError: false)
+        }
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
@@ -376,11 +381,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.isCurrent(generation) else { return }
             let previousName = previous?.rawValue ?? "temporary-unavailable"
-            self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); проверяем здоровье транспорта", isError: false)
-            self.appendLog("[ДИАГ] Handoff \(previousName) → \(pathType.rawValue): только health-check, TUN/WireGuard не перезапускаются", isError: false)
+            self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); обновляем транспорт", isError: false)
             GoClient.notifyNetworkChange()
+            GoClient.requestTransportReconnect()
 
-            self.pathQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self.pathQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self,
                       self.isCurrent(generation),
                       self.lastStablePath == pathType else { return }
@@ -388,7 +393,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         pathDebounceWorkItem = item
-        pathQueue.asyncAfter(deadline: .now() + 1.5, execute: item)
+        pathQueue.asyncAfter(deadline: .now() + 0.8, execute: item)
     }
 
     private func stopPathMonitor() {
