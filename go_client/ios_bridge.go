@@ -538,6 +538,14 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 	var bytesUpAtLastRX int64
 	lastTick := time.Now()
 
+	resetClocks := func(now time.Time, up int64, down int64) {
+		previousUp = up
+		previousDown = down
+		lastTX = time.Time{}
+		lastRX = now
+		bytesUpAtLastRX = up
+	}
+
 	evaluate := func(now time.Time) {
 		gap := now.Sub(lastTick)
 		lastTick = now
@@ -547,14 +555,10 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 			return
 		}
 
-		// A large ticker gap normally means iOS suspended the extension. Do not
-		// interpret stale timestamps as a dead network immediately after wake.
-		if gap > 75*time.Second || up < previousUp || down < previousDown {
-			previousUp = up
-			previousDown = down
-			lastTX = time.Time{}
-			lastRX = now
-			bytesUpAtLastRX = up
+		// A ticker gap larger than the 30s interval means iOS suspended the extension.
+		// Reset clocks so we never interpret sleep intervals as a dead network.
+		if gap > 35*time.Second || up < previousUp || down < previousDown {
+			resetClocks(now, up, down)
 			return
 		}
 
@@ -576,12 +580,11 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 		// Reconnect only when the user is actively sending traffic and receives
 		// nothing back for a sustained period. Idle/sleep alone is not failure.
 		if !lastTX.IsZero() &&
-			now.Sub(lastTX) <= 45*time.Second &&
-			now.Sub(lastRX) >= 25*time.Second &&
-			up-bytesUpAtLastRX >= 1024 {
+			now.Sub(lastTX) <= 60*time.Second &&
+			now.Sub(lastRX) >= 45*time.Second &&
+			up-bytesUpAtLastRX >= 2048 {
 			if rt.requestReconnect("health watchdog: есть TX, но нет RX") {
-				lastRX = now
-				bytesUpAtLastRX = up
+				resetClocks(now, up, down)
 			}
 		}
 	}
@@ -593,7 +596,12 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 		case now := <-ticker.C:
 			evaluate(now)
 		case <-rt.healthKick:
-			evaluate(time.Now())
+			// Explicit wake kick from iOS: reset clocks immediately to start fresh
+			now := time.Now()
+			lastTick = now
+			if up, down, ok := rt.statsSnapshot(); ok {
+				resetClocks(now, up, down)
+			}
 		}
 	}
 }

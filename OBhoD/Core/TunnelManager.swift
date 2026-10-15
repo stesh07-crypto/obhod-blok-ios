@@ -69,6 +69,7 @@ final class TunnelManager: ObservableObject {
     private var autoReconnectAttempts = 0
     private var autoReconnectTask: Task<Void, Never>?
     private var isAutoReconnectLaunching = false
+    private var recoveringSince: Date?
 
     // MARK: NetworkExtension
 
@@ -305,6 +306,10 @@ final class TunnelManager: ObservableObject {
             if stats == "Подключение…" || stats == "Переподключение…" || stats == "Отключение…" {
                 stats = "Подключено"
             }
+            if !defaults.bool(forKey: AppGroup.Keys.transportRecovering) {
+                isTransportRecovering = false
+                recoveringSince = nil
+            }
             writeWidgetStatus("connected")
 
         case .connecting:
@@ -465,10 +470,28 @@ final class TunnelManager: ObservableObject {
     private func syncExtensionState() {
         if isRunning || isConnecting {
             let recovering = defaults.bool(forKey: AppGroup.Keys.transportRecovering)
-            if isTransportRecovering != recovering {
-                isTransportRecovering = recovering
+            if recovering {
+                if recoveringSince == nil {
+                    recoveringSince = Date()
+                } else if let since = recoveringSince, Date().timeIntervalSince(since) > 10.0 {
+                    // Watchdog: clear zombie recovering state in AppGroup and UI
+                    defaults.set(false, forKey: AppGroup.Keys.transportRecovering)
+                    recoveringSince = nil
+                    isTransportRecovering = false
+                    if isRunning && (stats == "Переподключение…" || stats.contains("Переподключ")) {
+                        stats = "Подключено"
+                    }
+                } else if isTransportRecovering != recovering {
+                    isTransportRecovering = recovering
+                }
+            } else {
+                recoveringSince = nil
+                if isTransportRecovering {
+                    isTransportRecovering = false
+                }
             }
         } else if isTransportRecovering {
+            recoveringSince = nil
             isTransportRecovering = false
         }
 

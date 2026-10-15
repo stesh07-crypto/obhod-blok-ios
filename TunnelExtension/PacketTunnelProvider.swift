@@ -22,6 +22,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private var pathMonitor: NWPathMonitor?
     private var pathDebounceWorkItem: DispatchWorkItem?
+    private var recoveryWatchdogWorkItem: DispatchWorkItem?
     private var lastStablePath: PhysicalPath?
     private var pathWasUnavailable = false
 
@@ -156,6 +157,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pending?(TunnelError.cancelled)
 
         stopPathMonitor()
+        disarmRecoveryWatchdog()
         GoClient.clearPacketHandler()
         defaults?.set(false, forKey: AppGroup.Keys.tunnelRunning)
         defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
@@ -181,12 +183,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func wake() {
         appendLog("[VPN] wake: пробуждение устройства, проверяем и восстанавливаем транспорт", isError: false)
         GoClient.wakeHealthCheck()
-
-        workQueue.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, self.defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true else { return }
-            let accepted = GoClient.requestTransportReconnect()
-            self.appendLog("[СЕТЬ] wake: авто-реконнект транспорта: \(accepted ? "запущен" : "в процессе")", isError: false)
-        }
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
@@ -225,10 +221,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func updateTransportRecoveryState(from line: String) {
         if line.contains("[СЕТЬ] Перезапуск транспорта:") {
             defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
+            armRecoveryWatchdog()
             return
         }
 
         if line.contains("[IOS-TUN] WireGuard поднят") {
+            disarmRecoveryWatchdog()
             defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
             return
         }
@@ -236,7 +234,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if line.contains("[ГО-ВОРКЕР] Все воркеры завершены"),
            defaults?.bool(forKey: AppGroup.Keys.tunnelRunning) == true {
             defaults?.set(true, forKey: AppGroup.Keys.transportRecovering)
+            armRecoveryWatchdog()
         }
+    }
+
+    private func armRecoveryWatchdog() {
+        recoveryWatchdogWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.defaults?.bool(forKey: AppGroup.Keys.transportRecovering) == true else { return }
+            self.appendLog("[СЕТЬ] Таймаут восстановления транспорта (8с); сбрасываем флаг восстановления", isError: false)
+            self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+            GoClient.wakeHealthCheck()
+        }
+        recoveryWatchdogWorkItem = item
+        workQueue.asyncAfter(deadline: .now() + 8.0, execute: item)
+    }
+
+    private func disarmRecoveryWatchdog() {
+        recoveryWatchdogWorkItem?.cancel()
+        recoveryWatchdogWorkItem = nil
     }
 
     // MARK: Network settings
@@ -362,11 +378,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let previous = lastStablePath
-        let needsReconnect = previous != nil && (previous != pathType || pathWasUnavailable)
+        let isInterfaceHandoff = previous != nil && previous != pathType
+        let wasUnavailable = pathWasUnavailable
         lastStablePath = pathType
         pathWasUnavailable = false
 
-        guard needsReconnect else {
+        guard isInterfaceHandoff || (previous != nil && wasUnavailable) else {
             defaults?.set(pathType.label, forKey: AppGroup.Keys.physicalNetworkLabel)
             appendLog("[СЕТЬ] Активный интерфейс: \(pathType.rawValue)", isError: false)
             return
@@ -380,10 +397,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.isCurrent(generation) else { return }
-            let previousName = previous?.rawValue ?? "temporary-unavailable"
-            self.appendLog("[СЕТЬ] Стабильный handoff на \(pathType.rawValue); обновляем транспорт", isError: false)
-            GoClient.notifyNetworkChange()
-            GoClient.requestTransportReconnect()
+            if isInterfaceHandoff {
+                self.appendLog("[СЕТЬ] Смена физического интерфейса на \(pathType.rawValue); обновляем транспорт", isError: false)
+                GoClient.notifyNetworkChange()
+                GoClient.requestTransportReconnect()
+            } else {
+                self.appendLog("[СЕТЬ] Возобновление интерфейса \(pathType.rawValue); проверяем транспорт", isError: false)
+                GoClient.wakeHealthCheck()
+            }
 
             self.pathQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self,
