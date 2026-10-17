@@ -127,18 +127,40 @@ func getCacheID(streamID int) int {
 	return streamID / streamsPerCache
 }
 
-var credentialsStore = struct {
-	mu     sync.RWMutex
-	caches map[int]*StreamCredentialsCache
-}{
-	caches: make(map[int]*StreamCredentialsCache),
+func shortHashLog(h string) string {
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
 }
 
-func getStreamCache(streamID int) *StreamCredentialsCache {
-	cacheID := getCacheID(streamID)
+var credentialsStore = struct {
+	mu           sync.RWMutex
+	caches       map[string]*StreamCredentialsCache // keyed by normalized link/hash
+	streamToLink map[int]string                     // streamID -> normalized link/hash
+}{
+	caches:       make(map[string]*StreamCredentialsCache),
+	streamToLink: make(map[int]string),
+}
+
+func registerStreamLink(streamID int, link string) {
+	norm := normalizeVKJoinHash(link)
+	if norm == "" {
+		norm = link
+	}
+	credentialsStore.mu.Lock()
+	credentialsStore.streamToLink[streamID] = norm
+	credentialsStore.mu.Unlock()
+}
+
+func getLinkCache(link string) *StreamCredentialsCache {
+	norm := normalizeVKJoinHash(link)
+	if norm == "" {
+		norm = link
+	}
 
 	credentialsStore.mu.RLock()
-	cache, exists := credentialsStore.caches[cacheID]
+	cache, exists := credentialsStore.caches[norm]
 	credentialsStore.mu.RUnlock()
 
 	if exists {
@@ -148,13 +170,25 @@ func getStreamCache(streamID int) *StreamCredentialsCache {
 	credentialsStore.mu.Lock()
 	defer credentialsStore.mu.Unlock()
 
-	if cache, exists = credentialsStore.caches[cacheID]; exists {
+	if cache, exists = credentialsStore.caches[norm]; exists {
 		return cache
 	}
 
 	cache = &StreamCredentialsCache{}
-	credentialsStore.caches[cacheID] = cache
+	credentialsStore.caches[norm] = cache
 	return cache
+}
+
+func getStreamCache(streamID int) *StreamCredentialsCache {
+	credentialsStore.mu.RLock()
+	link, exists := credentialsStore.streamToLink[streamID]
+	credentialsStore.mu.RUnlock()
+
+	if exists && link != "" {
+		return getLinkCache(link)
+	}
+
+	return getLinkCache(strconv.Itoa(streamID))
 }
 
 func (c *StreamCredentialsCache) invalidate(streamID int) {
@@ -188,7 +222,6 @@ func isAuthError(err error) bool {
 
 func handleAuthError(streamID int) bool {
 	cache := getStreamCache(streamID)
-	cacheID := getCacheID(streamID)
 
 	now := time.Now().Unix()
 
@@ -199,10 +232,10 @@ func handleAuthError(streamID int) bool {
 	count := cache.errorCount.Add(1)
 	cache.lastErrorTime.Store(now)
 
-	log.Printf("[STREAM %d] Auth error (cache=%d, count=%d/%d)", streamID, cacheID, count, maxCacheErrors)
+	log.Printf("[STREAM %d] Auth error (count=%d/%d)", streamID, count, maxCacheErrors)
 
 	if count >= maxCacheErrors {
-		log.Printf("[VK Auth] Multiple auth errors detected (%d), invalidating cache %d", count, cacheID)
+		log.Printf("[VK Auth] Multiple auth errors detected (%d), invalidating cache", count)
 		cache.invalidate(streamID)
 		return true
 	}
@@ -229,17 +262,21 @@ func vkDelayRandom(minMs, maxMs int) {
 // ─── Cached credential fetcher ───
 
 func getVkCredsCached(ctx context.Context, link string, streamID int) (string, string, []string, error) {
-	cache := getStreamCache(streamID)
-	cacheID := getCacheID(streamID)
+	normLink := normalizeVKJoinHash(link)
+	if normLink == "" {
+		normLink = link
+	}
+	registerStreamLink(streamID, normLink)
+	cache := getLinkCache(normLink)
 
 	cache.mutex.RLock()
-	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
+	if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
 		expires := time.Until(cache.creds.ExpiresAt)
 		u, p := cache.creds.Username, cache.creds.Password
 		addr := cache.creds.ServerAddrs[streamID%len(cache.creds.ServerAddrs)]
 		addrs := cloneStringSlice(cache.creds.ServerAddrs)
 		cache.mutex.RUnlock()
-		log.Printf("[STREAM %d] [VK Auth] Using cached credentials (cache=%d, expires in %v, selected=%s, urls=%d)", streamID, cacheID, expires.Truncate(time.Second), addr, len(addrs))
+		log.Printf("[STREAM %d] [VK Auth] Using cached credentials for %s... (expires in %v, selected=%s, urls=%d)", streamID, shortHashLog(normLink), expires.Truncate(time.Second), addr, len(addrs))
 		return u, p, addrs, nil
 	}
 	cache.mutex.RUnlock()
@@ -248,12 +285,17 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 	defer cache.mutex.Unlock()
 
 	// Double-check inside lock
-	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
+	if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
 		return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), nil
 	}
 
-	user, pass, addrs, err := fetchVkCredsSerialized(ctx, link, streamID)
+	user, pass, addrs, err := fetchVkCredsSerialized(ctx, normLink, streamID)
 	if err != nil {
+		// If fetch failed due to temporary flood or network, but we have existing cached creds (even recently expired by <= 15m), reuse them!
+		if cache.creds.Username != "" && len(cache.creds.ServerAddrs) > 0 && time.Since(cache.creds.ExpiresAt) < 15*time.Minute {
+			log.Printf("[STREAM %d] [VK Auth] Fetch error (%v), but reusing existing cached credentials for %s...", streamID, err, shortHashLog(normLink))
+			return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), nil
+		}
 		return "", "", nil, err
 	}
 
@@ -262,7 +304,7 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 		Password:    pass,
 		ServerAddrs: addrs,
 		ExpiresAt:   time.Now().Add(credentialLifetime - cacheSafetyMargin),
-		Link:        link,
+		Link:        normLink,
 	}
 	return user, pass, cloneStringSlice(addrs), nil
 }
@@ -278,8 +320,8 @@ func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (str
 	vkRequestMu.Lock()
 	defer vkRequestMu.Unlock()
 
-	// Throttle: 3-6 seconds between requests
-	minInterval := 3*time.Second + time.Duration(rand.Intn(3000))*time.Millisecond
+	// Throttle: 1.2-2.0 seconds between distinct VK API requests
+	minInterval := 1200*time.Millisecond + time.Duration(rand.Intn(800))*time.Millisecond
 	elapsed := time.Since(globalLastVkFetchTime)
 
 	if !globalLastVkFetchTime.IsZero() && elapsed < minInterval {
@@ -318,6 +360,11 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 			if callErr, ok := asCallUnavailableError(err); ok {
 				log.Printf("[STREAM %d] [VK Auth] VK Calls path returned non-retryable call error: %v", streamID, callErr)
 				return "", "", nil, callErr
+			}
+			errStr := err.Error()
+			if strings.Contains(errStr, "Flood control") || strings.Contains(errStr, "error_code=9") || strings.Contains(errStr, "error_code: 9") {
+				log.Printf("[STREAM %d] [VK Auth] VK Calls flood control detected: %v (cooldown, do not fallback to legacy)", streamID, err)
+				return "", "", nil, fmt.Errorf("VK_FLOOD_CONTROL: %w", err)
 			}
 			log.Printf("[STREAM %d] [VK Auth] VK Calls path failed (%s), falling back to legacy", streamID, describeVKCallsFailure(err))
 		}

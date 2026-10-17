@@ -43,17 +43,38 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	log.Printf("[ГРУППА #%d] Запрос кредов (хеш: %s...)", groupID, shortHash)
 
 	credStreamID := groupID * 100
-	user, pass, turnURLs, err := GetCreds(ctx, hash, credStreamID)
-	var creds *Credentials
-	if err == nil {
-		creds = &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
-	} else {
-		log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
+	var user, pass string
+	var turnURLs []string
+	var err error
+	for credAttempt := 1; credAttempt <= 3; credAttempt++ {
+		user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			if signalReady != nil {
+				close(signalReady)
+			}
+			return
+		}
+		log.Printf("[ГРУППА #%d] Попытка %d получения кредов не удалась: %v", groupID, credAttempt, err)
+		select {
+		case <-time.After(time.Duration(credAttempt) * 1500 * time.Millisecond):
+		case <-ctx.Done():
+			if signalReady != nil {
+				close(signalReady)
+			}
+			return
+		}
+	}
+	if err != nil {
+		log.Printf("[ГРУППА #%d] Ошибка кредов (все попытки исчерпаны): %v", groupID, err)
 		if signalReady != nil {
 			close(signalReady)
 		}
 		return
 	}
+	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
 
 	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
 
