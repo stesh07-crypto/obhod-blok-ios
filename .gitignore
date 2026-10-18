@@ -8,3 +8,8 @@ Frameworks/libwdttclient.xcframework
 build_artifacts/
 *.ipa
 *.zip
+scratch/
+*.json
+*.txt
+check_*.py
+scripts/upload_testflight.py

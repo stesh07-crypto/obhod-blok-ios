@@ -120,7 +120,13 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		defer refreshMu.Unlock()
 
 		for refreshInFlight {
+			if ctx.Err() != nil {
+				return false
+			}
 			refreshCond.Wait()
+		}
+		if ctx.Err() != nil {
+			return false
 		}
 
 		credsMu.RLock()
@@ -128,47 +134,66 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		credsMu.RUnlock()
 
 		if failedGen > 0 && currentGen > failedGen {
-			log.Printf("[ГРУППА #%d] [TURN] Креды уже обновлены (актуальное поколение %d > %d, %s)", groupID, currentGen, failedGen, reason)
+			log.Printf("[ГРУППА #%d] [TURN] Локальные креды уже обновлены (актуальное поколение %d > failed=%d, %s)", groupID, currentGen, failedGen, reason)
 			return true
+		}
+
+		// Если в общем кеше уже есть более свежее поколение (полученное другой группой),
+		// забираем его сразу без повторного обращения к VK API.
+		normHash := normalizeVKJoinHash(hash)
+		if normHash == "" {
+			normHash = hash
+		}
+		c := getLinkCache(normHash)
+		c.mutex.RLock()
+		cacheGen := c.creds.Generation
+		cacheValid := c.creds.Link == normHash && time.Now().Before(c.creds.ExpiresAt) && len(c.creds.ServerAddrs) > 0
+		c.mutex.RUnlock()
+
+		if cacheValid && failedGen > 0 && cacheGen > failedGen {
+			u, p, urls, newGen, err := GetCredsWithGen(ctx, hash, credStreamID)
+			if err == nil && newGen > failedGen {
+				credsMu.Lock()
+				creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID, Generation: newGen, GroupID: groupID}
+				credsMu.Unlock()
+				log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша (gen=%d > failed=%d)", groupID, newGen, failedGen)
+				return true
+			}
 		}
 
 		now := time.Now().Unix()
 		last := lastCredRefresh.Load()
 		if last > 0 && now-last < 15 {
-			log.Printf("[ГРУППА #%d] [TURN] Креды уже запрашивались %d сек назад, ждём следующий retry (%s)", groupID, now-last, reason)
-			return true
+			log.Printf("[ГРУППА #%d] [TURN] Обновление реквизитов отложено: предыдущий запрос был %d сек назад (%s)", groupID, now-last, reason)
+			return false
 		}
 
 		lastCredRefresh.Store(now)
 		refreshInFlight = true
 
 		refreshMu.Unlock()
-
-		var u, p string
-		var urls []string
-		var newGen uint64
-		var refreshErr error
+		defer func() {
+			refreshMu.Lock()
+			refreshInFlight = false
+			refreshCond.Broadcast()
+			refreshMu.Unlock()
+		}()
 
 		if getVkAuthMode() == "account" {
 			invalidateInjectedTurnCreds(hash)
 		}
 		InvalidateLinkCacheIfGen(hash, failedGen)
 
-		u, p, urls, newGen, refreshErr = GetCredsWithGen(ctx, hash, credStreamID)
-
-		refreshMu.Lock()
-		refreshInFlight = false
-		refreshCond.Broadcast()
-
+		u, p, urls, newGen, refreshErr := GetCredsWithGen(ctx, hash, credStreamID)
 		if refreshErr != nil {
-			log.Printf("[ГРУППА #%d] [TURN] Не удалось обновить креды после %s: %v", groupID, reason, refreshErr)
+			log.Printf("[ГРУППА #%d] [TURN] Не удалось обновить реквизиты после %s: %v", groupID, reason, refreshErr)
 			return false
 		}
 
 		credsMu.Lock()
 		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID, Generation: newGen, GroupID: groupID}
 		credsMu.Unlock()
-		log.Printf("[ГРУППА #%d] [TURN] Креды успешно обновлены после %s (gen=%d, urls=%d)", groupID, reason, newGen, len(urls))
+		log.Printf("[ГРУППА #%d] [TURN] Реквизиты успешно обновлены после %s (gen=%d, urls=%d)", groupID, reason, newGen, len(urls))
 		return true
 	}
 
@@ -235,20 +260,29 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					errStr := sessErr.Error()
 					errStrLower := strings.ToLower(errStr)
 
-					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") &&
-						strings.Contains(errStrLower, "attribute not found")
-					isTurnQuota := strings.Contains(errStrLower, "quota") || strings.Contains(errStr, "486")
-					quotaRetry = isTurnQuota
+
+					isTurnQuota := strings.Contains(errStr, "TURN_QUOTA") || strings.Contains(errStrLower, "quota") || strings.Contains(errStr, "486")
+					isTurnForbidden := strings.Contains(errStr, "TURN_FORBIDDEN") || (strings.Contains(errStrLower, "forbidden") && !strings.Contains(errStr, "TURN_AUTH_REJECTED"))
+					isTurnStaleNonce := strings.Contains(errStr, "TURN_STALE_NONCE") || strings.Contains(errStrLower, "stale nonce")
+					isTurnCapacity := strings.Contains(errStr, "TURN_CAPACITY") || strings.Contains(errStr, "508")
+					turnAllocAttrMissing := strings.Contains(errStr, "TURN_ATTR_NOT_FOUND") || (strings.Contains(errStrLower, "turn allocate") && strings.Contains(errStrLower, "attribute not found"))
+					isDtlsTimeout := strings.Contains(errStr, "DTLS_TIMEOUT")
+
 					transientSocketRetry = strings.Contains(errStrLower, "cannot create socket") ||
 						strings.Contains(errStrLower, "network is unreachable") ||
 						strings.Contains(errStrLower, "no route to host") ||
 						strings.Contains(errStrLower, "network changed") ||
 						strings.Contains(errStrLower, "operation not permitted")
 
-					turnAuthRejected := !isTurnQuota && !transientSocketRetry && (
-						strings.Contains(errStrLower, "turn_auth_rejected") ||
-						strings.Contains(errStrLower, "invalid credential") ||
-						strings.Contains(errStrLower, "stale nonce"))
+					quotaRetry = isTurnQuota
+
+					// ТОЛЬКО окончательный отказ авторизации (401/441/TURN_AUTH_REJECTED) вызывает обновление реквизитов!
+					// 403 Forbidden, 438 Stale Nonce, 486 Quota, 508 Capacity, Attribute Not Found, DTLS_TIMEOUT НЕ являются turnAuthRejected!
+					turnAuthRejected := !isTurnQuota && !isTurnForbidden && !isTurnStaleNonce && !isTurnCapacity &&
+						!turnAllocAttrMissing && !isDtlsTimeout && !transientSocketRetry && (
+						strings.Contains(errStr, "TURN_AUTH_REJECTED") ||
+							strings.Contains(errStrLower, "unauthorized") ||
+							strings.Contains(errStrLower, "wrong credentials"))
 
 					if hint := workerErrorHint(sessErr); hint != "" {
 						errStr += " | " + hint
@@ -292,8 +326,16 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						log.Printf("[ГР #%d | ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повтор с теми же кредами (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					case isTurnQuota:
 						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Квота relay исчерпана, ждём (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
+					case isTurnForbidden:
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Отказ сервера по политике (403 Forbidden, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+					case isTurnStaleNonce:
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Устаревший nonce (438 Stale Nonce, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+					case isTurnCapacity:
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Недостаток ёмкости сервера (508 Insufficient Capacity, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
 					case turnAllocAttrMissing:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ (relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Неполный STUN/TURN ответ (relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+					case isDtlsTimeout:
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Таймаут рукопожатия DTLS (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					case turnAuthRejected:
 						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d), обновление реквизитов (попытка %d): %s", groupID, wid, turnRelay, credsSnapshot.Generation, attempt, errStr)
 						refreshCreds("TURN auth rejection", credsSnapshot.Generation)

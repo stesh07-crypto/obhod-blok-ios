@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v4/stdnet"
 	"github.com/pion/turn/v5"
 )
@@ -167,13 +169,42 @@ func RunSession(
 
 	relay, err := tc.Allocate()
 	if err != nil {
-		if isAuthError(err) {
-			handleAuthError(creds.CacheStreamID)
-			return false, fmt.Errorf("TURN_AUTH_REJECTED: %w", err)
+		var turnErr *stun.TurnError
+		if errors.As(err, &turnErr) {
+			switch turnErr.ErrorCodeAttr.Code {
+			case stun.CodeUnauthorized, stun.CodeWrongCredentials:
+				return false, fmt.Errorf("TURN_AUTH_REJECTED (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
+			case stun.CodeForbidden:
+				return false, fmt.Errorf("TURN_FORBIDDEN (код 403): %w", err)
+			case stun.CodeStaleNonce:
+				return false, fmt.Errorf("TURN_STALE_NONCE (код 438): %w", err)
+			case stun.CodeAllocQuotaReached:
+				return false, fmt.Errorf("TURN_QUOTA (код 486): %w", err)
+			case stun.CodeInsufficientCapacity:
+				return false, fmt.Errorf("TURN_CAPACITY (код 508): %w", err)
+			default:
+				return false, fmt.Errorf("TURN_ERROR (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
+			}
+		}
+		if errors.Is(err, stun.ErrAttributeNotFound) || strings.Contains(strings.ToLower(err.Error()), "attribute not found") {
+			return false, fmt.Errorf("TURN_ATTR_NOT_FOUND (неполный ответ или отсутствие обязательного атрибута STUN/TURN): %w", err)
 		}
 		errStr := err.Error()
-		if strings.Contains(errStr, "Quota") || strings.Contains(errStr, "486") {
-			return false, fmt.Errorf("TURN квота: %w", err)
+		errStrLower := strings.ToLower(errStr)
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "441") || strings.Contains(errStrLower, "unauthorized") || strings.Contains(errStrLower, "wrong credentials") {
+			return false, fmt.Errorf("TURN_AUTH_REJECTED: %w", err)
+		}
+		if strings.Contains(errStr, "403") || strings.Contains(errStrLower, "forbidden") {
+			return false, fmt.Errorf("TURN_FORBIDDEN: %w", err)
+		}
+		if strings.Contains(errStr, "438") || strings.Contains(errStrLower, "stale nonce") {
+			return false, fmt.Errorf("TURN_STALE_NONCE: %w", err)
+		}
+		if strings.Contains(errStr, "486") || strings.Contains(errStrLower, "quota") {
+			return false, fmt.Errorf("TURN_QUOTA: %w", err)
+		}
+		if strings.Contains(errStr, "508") || strings.Contains(errStrLower, "capacity") {
+			return false, fmt.Errorf("TURN_CAPACITY: %w", err)
 		}
 		return false, fmt.Errorf("TURN Allocate (%s): %w", turnAddr, err)
 	}
@@ -313,7 +344,7 @@ func RunSession(
 	select {
 	case handshakeSem <- struct{}{}:
 	case <-sessCtx.Done():
-		return false, sessCtx.Err()
+		return false, fmt.Errorf("DTLS семафор отменён: %w", sessCtx.Err())
 	}
 	semWait := time.Since(semStart)
 
@@ -336,7 +367,7 @@ func RunSession(
 
 	hctx, hcancel := context.WithTimeout(sessCtx, 50*time.Second)
 	hsStart := time.Now()
-	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)... (relay=%s, очередь=%v)", creds.GroupID, sessionID, turnAddr, semWait.Round(time.Millisecond))
+	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)... (relay=%s, gen=%d, очередь=%v)", creds.GroupID, sessionID, turnAddr, creds.Generation, semWait.Round(time.Millisecond))
 	err = dtlsConn.HandshakeContext(hctx)
 	hsDur := time.Since(hsStart)
 	hcancel()
@@ -345,11 +376,11 @@ func RunSession(
 	if err != nil {
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
-			return false, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, очередь=%v, hs=%v)", turnAddr, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
+			return false, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v)", turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
 		}
-		return false, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, hs=%v): %w", turnAddr, hsDur.Round(time.Millisecond), err)
+		return false, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
 	}
-	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Соединение установлено ✓ (relay=%s, очередь=%v, hs=%v)", creds.GroupID, sessionID, turnAddr, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
+	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v)", creds.GroupID, sessionID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
 
 	stats.ActiveConnections.Add(1)
 	defer stats.ActiveConnections.Add(-1)

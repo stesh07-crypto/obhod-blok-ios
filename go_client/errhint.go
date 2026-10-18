@@ -27,10 +27,20 @@ func workerErrorHint(err error) string {
 		return "нет маршрута до сервера — проверьте интернет; отключите другие VPN/прокси"
 	case strings.Contains(text, "lookup") || strings.Contains(text, "no such host"):
 		return "DNS не резолвит адрес — смените DNS в ⚙️ → Сеть"
-	case strings.Contains(text, "turn квота") || strings.Contains(text, "quota") || strings.Contains(text, "486"):
+	case strings.Contains(text, "turn квота") || strings.Contains(text, "turn_quota") || strings.Contains(text, "quota") || strings.Contains(text, "486"):
 		return "VK исчерпал TURN-слоты — уменьшите потоки или смените VK-хеш/аккаунт"
+	case strings.Contains(text, "turn_auth_rejected"):
+		return "отказ авторизации TURN — реквизиты отклонены сервером"
+	case strings.Contains(text, "turn_forbidden"):
+		return "запрос отклонён сервером TURN (403 Forbidden)"
+	case strings.Contains(text, "turn_stale_nonce"):
+		return "устаревший nonce TURN (438) — требуется повтор запроса с новым nonce"
+	case strings.Contains(text, "turn_capacity"):
+		return "сервер TURN перегружен (508 Insufficient Capacity)"
+	case strings.Contains(text, "turn_attr_not_found") || strings.Contains(text, "attribute not found"):
+		return "неполный ответ STUN/TURN сервера — ответ не содержит обязательного атрибута"
 	case strings.Contains(text, "turn allocate"):
-		return "ошибка TURN relay — VK может резать UDP; попробуйте другой хеш или режим капчи"
+		return "ошибка TURN relay при попытке выделения адреса"
 	case strings.Contains(text, "rate limit") || strings.Contains(text, "flood") || strings.Contains(text, "error 29") || strings.Contains(text, "error_code=9") || strings.Contains(text, "error_code: 9"):
 		return "VK временно ограничил запросы (Flood Control) — шлюз ожидает кулдаун перед повтором"
 	case strings.Contains(text, "rtp aead") || strings.Contains(text, "auth failed") || strings.Contains(text, "tag mismatch"):

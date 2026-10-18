@@ -21,6 +21,7 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
+	"github.com/pion/stun/v3"
 )
 
 // ─── VK Credential Sets (2 stable app_id with rotating fallback) ───
@@ -193,18 +194,13 @@ func getStreamCache(streamID int) *StreamCredentialsCache {
 	return getLinkCache(strconv.Itoa(streamID))
 }
 
-func (c *StreamCredentialsCache) invalidate(streamID int) {
-	c.mutex.Lock()
-	c.creds = TurnCredentials{}
-	c.mutex.Unlock()
-
-	c.errorCount.Store(0)
-	c.lastErrorTime.Store(0)
-
-	log.Printf("[STREAM %d] [VK Auth] Credentials cache invalidated", streamID)
-}
+var vkFetchOverride func(ctx context.Context, link string, streamID int) (string, string, []string, error)
 
 func InvalidateLinkCacheIfGen(link string, failedGen uint64) bool {
+	if failedGen == 0 {
+		log.Printf("[VK Auth] Сброс кеша для %s отклонён: нулевое поколение не имеет права сбрасывать кеш", shortHashLog(link))
+		return false
+	}
 	normLink := normalizeVKJoinHash(link)
 	if normLink == "" {
 		normLink = link
@@ -213,15 +209,27 @@ func InvalidateLinkCacheIfGen(link string, failedGen uint64) bool {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
 
-	if failedGen == 0 || cache.creds.Generation == failedGen {
-		cache.creds = TurnCredentials{}
-		cache.errorCount.Store(0)
-		cache.lastErrorTime.Store(0)
-		log.Printf("[VK Auth] Кеш реквизитов (gen=%d) для %s инвалидирован (подтверждённый отказ)", failedGen, shortHashLog(normLink))
-		return true
+	if cache.creds.Link == "" || len(cache.creds.ServerAddrs) == 0 {
+		log.Printf("[VK Auth] Сброс кеша (gen=%d) для %s пропущен: кеш уже пуст", failedGen, shortHashLog(normLink))
+		return false
 	}
-	log.Printf("[VK Auth] Кеш для %s уже новее (gen=%d > failed=%d), сброс пропущен", shortHashLog(normLink), cache.creds.Generation, failedGen)
-	return false
+
+	if cache.creds.Generation != failedGen {
+		if cache.creds.Generation > failedGen {
+			log.Printf("[VK Auth] Сброс кеша для %s пропущен: кеш уже новее (актуальное gen=%d > failed=%d)", shortHashLog(normLink), cache.creds.Generation, failedGen)
+		} else {
+			log.Printf("[VK Auth] Сброс кеша для %s пропущен: несовпадение поколения (актуальное gen=%d != failed=%d)", shortHashLog(normLink), cache.creds.Generation, failedGen)
+		}
+		return false
+	}
+
+	// Очищаем только реквизиты совпадающего поколения.
+	// Монотонный счётчик поколений cache.generation не обнуляем!
+	cache.creds = TurnCredentials{}
+	cache.errorCount.Store(0)
+	cache.lastErrorTime.Store(0)
+	log.Printf("[VK Auth] Кеш реквизитов поколения %d для %s успешно инвалидирован (подтверждённый отказ)", failedGen, shortHashLog(normLink))
+	return true
 }
 
 func cloneStringSlice(in []string) []string {
@@ -234,34 +242,18 @@ func isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "401") ||
-		strings.Contains(errStr, "Unauthorized") ||
-		strings.Contains(errStr, "authentication") ||
-		strings.Contains(errStr, "invalid credential") ||
-		strings.Contains(errStr, "stale nonce")
-}
-
-func handleAuthError(streamID int) bool {
-	cache := getStreamCache(streamID)
-
-	now := time.Now().Unix()
-
-	if now-cache.lastErrorTime.Load() > int64(errorWindow.Seconds()) {
-		cache.errorCount.Store(0)
+	var turnErr *stun.TurnError
+	if errors.As(err, &turnErr) {
+		return turnErr.ErrorCodeAttr.Code == stun.CodeUnauthorized ||
+			turnErr.ErrorCodeAttr.Code == stun.CodeWrongCredentials
 	}
-
-	count := cache.errorCount.Add(1)
-	cache.lastErrorTime.Store(now)
-
-	log.Printf("[STREAM %d] Auth error (count=%d/%d)", streamID, count, maxCacheErrors)
-
-	if count >= maxCacheErrors {
-		log.Printf("[VK Auth] Multiple auth errors detected (%d), invalidating cache", count)
-		cache.invalidate(streamID)
-		return true
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "stale nonce") || strings.Contains(errStr, "forbidden") {
+		return false
 	}
-	return false
+	return strings.Contains(errStr, "turn_auth_rejected") ||
+		strings.Contains(errStr, "unauthorized") ||
+		strings.Contains(errStr, "wrong credentials")
 }
 
 // ─── Captcha lockout ───
@@ -337,6 +329,9 @@ var (
 )
 
 func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+	if vkFetchOverride != nil {
+		return vkFetchOverride(ctx, link, streamID)
+	}
 	// 1. Проверяем FloodGate перед блокировкой мьютекса
 	isProbe, err := GlobalFloodGate.Acquire(ctx, streamID)
 	if err != nil {
