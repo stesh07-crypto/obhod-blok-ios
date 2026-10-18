@@ -33,7 +33,15 @@ const (
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
-var handshakeSem = make(chan struct{}, 3)
+var (
+	handshakeSem       = make(chan struct{}, 3)
+	HandshakesInFlight atomic.Int32
+	HandshakesWaiting  atomic.Int32
+	HandshakeSuccess   atomic.Int64
+	HandshakeTimeout   atomic.Int64
+	HandshakeCanceled  atomic.Int64
+	HandshakeErrors    atomic.Int64
+)
 
 // NullLoggerFactory подавляет логи pion
 type NullLoggerFactory struct{}
@@ -340,13 +348,21 @@ func RunSession(
 	}
 
 	// Acquire handshake semaphore
+	HandshakesWaiting.Add(1)
 	semStart := time.Now()
 	select {
 	case handshakeSem <- struct{}{}:
+		HandshakesWaiting.Add(-1)
 	case <-sessCtx.Done():
-		return false, fmt.Errorf("DTLS семафор отменён: %w", sessCtx.Err())
+		HandshakesWaiting.Add(-1)
+		HandshakeCanceled.Add(1)
+		semWait := time.Since(semStart)
+		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Ожидание слота отменено (очередь=%v, в_очереди=%d, hs_активно=%d): %v",
+			creds.GroupID, sessionID, creds.AttemptID, semWait.Round(time.Millisecond), HandshakesWaiting.Load(), HandshakesInFlight.Load(), sessCtx.Err())
+		return false, fmt.Errorf("DTLS семафор отменён (очередь=%v): %w", semWait.Round(time.Millisecond), sessCtx.Err())
 	}
 	semWait := time.Since(semStart)
+	HandshakesInFlight.Add(1)
 
 	dtlsCfg := &dtls.Config{
 		Certificates:          []tls.Certificate{cert},
@@ -361,26 +377,39 @@ func RunSession(
 	dtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)
 	if err != nil {
 		<-handshakeSem
+		HandshakesInFlight.Add(-1)
+		HandshakeErrors.Add(1)
 		return false, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
 	}
 	defer dtlsConn.Close()
 
 	hctx, hcancel := context.WithTimeout(sessCtx, 50*time.Second)
 	hsStart := time.Now()
-	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)... (relay=%s, gen=%d, очередь=%v)", creds.GroupID, sessionID, turnAddr, creds.Generation, semWait.Round(time.Millisecond))
+	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Рукопожатие начато... (relay=%s, gen=%d, очередь=%v, hs_активно=%d, в_очереди=%d)",
+		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load())
 	err = dtlsConn.HandshakeContext(hctx)
 	hsDur := time.Since(hsStart)
 	hcancel()
 	<-handshakeSem // RELEASE SEMAPHORE IMMEDIATELY AFTER HANDSHAKE
+	HandshakesInFlight.Add(-1)
 
 	if err != nil {
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
-			return false, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v)", turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
+			HandshakeTimeout.Add(1)
+			return false, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
+				turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
+		}
+		if sessCtx.Err() != nil {
+			HandshakeCanceled.Add(1)
+		} else {
+			HandshakeErrors.Add(1)
 		}
 		return false, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
 	}
-	log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v)", creds.GroupID, sessionID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond))
+	HandshakeSuccess.Add(1)
+	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
+		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
 
 	stats.ActiveConnections.Add(1)
 	defer stats.ActiveConnections.Add(-1)

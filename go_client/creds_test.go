@@ -398,3 +398,242 @@ func TestFailureState_DoesNotCorruptCache(t *testing.T) {
 		t.Fatalf("expected successful recovery: user=%s, gen=%d, err=%v", u, gen, err)
 	}
 }
+
+// ─── Tests for GroupCredCoordinator (P0 Mutex & Single-Flight) ───
+
+func TestCoordinator_SuccessNoDoubleUnlock(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_success"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		c := fetchCount.Add(1)
+		return fmt.Sprintf("coord_user_%d", c), "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	// Начальная инициализация как в реальном клиенте (gen=1)
+	u, p, urls, gen, err := GetCredsWithGen(ctx, link, 100)
+	if err != nil {
+		t.Fatalf("initial GetCredsWithGen failed: %v", err)
+	}
+	initialCreds := &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: 100, Generation: gen, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	// Запуск обновления (должен пройти без двойного unlock и обновить реквизиты до gen=2)
+	ok := coord.RefreshCreds(ctx, ctx, "test_success", 1)
+	if !ok {
+		t.Fatalf("expected RefreshCreds to return true")
+	}
+
+	snap := coord.Snapshot(0)
+	if snap.Generation != 2 || snap.User != "coord_user_2" {
+		t.Fatalf("expected snap gen=2, user=coord_user_2; got gen=%d, user=%s", snap.Generation, snap.User)
+	}
+}
+
+func TestCoordinator_ErrorReleasesStateCleanly(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_err"
+	resetLinkCache(link)
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		return "", "", nil, errors.New("VK API network error")
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	initialCreds := &Credentials{User: "init", Pass: "pass", TurnURLs: []string{"193.203.43.46:19302"}, CacheStreamID: 100, Generation: 1, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	ok := coord.RefreshCreds(ctx, ctx, "test_error", 1)
+	if ok {
+		t.Fatalf("expected RefreshCreds to return false on error")
+	}
+
+	// Проверяем, что состояние activeOp корректно сброшено
+	coord.mu.Lock()
+	hasActive := (coord.activeOp != nil)
+	coord.mu.Unlock()
+
+	if hasActive {
+		t.Fatalf("activeOp must be nil after error")
+	}
+}
+
+func TestCoordinator_MultipleWorkersCoalesceIntoSingleFetch(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_coalesce"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		time.Sleep(50 * time.Millisecond) // задержка для имитации сетевого запроса
+		c := fetchCount.Add(1)
+		return fmt.Sprintf("user_%d", c), "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	// Начальная инициализация (gen=1)
+	u, p, urls, gen, err := GetCredsWithGen(ctx, link, 100)
+	if err != nil {
+		t.Fatalf("initial GetCredsWithGen failed: %v", err)
+	}
+	initialCreds := &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: 100, Generation: gen, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	// 10 воркеров одновременно вызывают RefreshCreds
+	var wg sync.WaitGroup
+	const workerCount = 10
+	results := make([]bool, workerCount)
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = coord.RefreshCreds(ctx, ctx, "test_concurrent", 1)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, r := range results {
+		if !r {
+			t.Errorf("worker %d got false, expected true", i)
+		}
+	}
+
+	// Ровно 1 запрос при инициализации + 1 при общем координированном обновлении = 2
+	if fetchCount.Load() != 2 {
+		t.Fatalf("expected exactly 2 total fetches (1 init + 1 coalesced refresh), got %d", fetchCount.Load())
+	}
+	if coord.CurrentGeneration() != 2 {
+		t.Fatalf("expected coord gen=2, got %d", coord.CurrentGeneration())
+	}
+}
+
+func TestCoordinator_WorkerCancelDoesNotBreakSharedFetch(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_worker_cancel"
+	resetLinkCache(link)
+
+	groupCtx := context.Background()
+	// Начальная инициализация (gen=1) с простым неблокирующим ответом
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		return "init_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	u, p, urls, gen, err := GetCredsWithGen(groupCtx, link, 100)
+	if err != nil {
+		t.Fatalf("initial GetCredsWithGen failed: %v", err)
+	}
+	initialCreds := &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: 100, Generation: gen, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	// Теперь для обновления устанавливаем блокирующий override
+	fetchStarted := make(chan struct{})
+	worker1CanFinish := make(chan struct{})
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		select {
+		case <-worker1CanFinish:
+			return "user_shared", "pass", []string{"193.203.43.46:19302"}, nil
+		case <-ctx.Done():
+			return "", "", nil, ctx.Err()
+		}
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	// Воркер 1 запускает обновление
+	var worker1Result bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		worker1Result = coord.RefreshCreds(groupCtx, groupCtx, "worker1", 1)
+	}()
+
+	// Ждем, пока сетевой запрос воркера 1 гарантированно стартует и займет activeOp
+	<-fetchStarted
+
+	// Воркер 2 подключается с контекстом, который отменяется через 10мс
+	worker2Ctx, cancel2 := context.WithTimeout(groupCtx, 10*time.Millisecond)
+	defer cancel2()
+
+	worker2Result := coord.RefreshCreds(worker2Ctx, groupCtx, "worker2", 1)
+	if worker2Result {
+		t.Fatalf("worker 2 should return false due to canceled context")
+	}
+
+	// Разрешаем воркеру 1 завершить получение
+	close(worker1CanFinish)
+	wg.Wait()
+
+	if !worker1Result {
+		t.Fatalf("worker 1 should have succeeded despite worker 2 canceling")
+	}
+
+	if coord.CurrentGeneration() != 2 {
+		t.Fatalf("expected coord gen=2, got %d", coord.CurrentGeneration())
+	}
+}
+
+func TestCoordinator_EarlyReturnNewerGeneration(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_early"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		fetchCount.Add(1)
+		return "user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	// Координатор уже на поколении 3
+	initialCreds := &Credentials{User: "user", Pass: "pass", TurnURLs: []string{"193.203.43.46:19302"}, CacheStreamID: 100, Generation: 3, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	// Приходит запоздавшая ошибка от поколения 2
+	ok := coord.RefreshCreds(ctx, ctx, "late_error", 2)
+	if !ok {
+		t.Fatalf("expected early return true when currentGen > failedGen")
+	}
+
+	if fetchCount.Load() != 0 {
+		t.Fatalf("fetch should not have been called when credentials are already newer")
+	}
+}
+
+func TestCoordinator_EarlyReturnCooldown(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_cooldown"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		fetchCount.Add(1)
+		return "", "", nil, errors.New("temporary error")
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	initialCreds := &Credentials{User: "user", Pass: "pass", TurnURLs: []string{"193.203.43.46:19302"}, CacheStreamID: 100, Generation: 1, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initialCreds)
+
+	// Первая попытка
+	coord.RefreshCreds(ctx, ctx, "first", 1)
+	if fetchCount.Load() != 1 {
+		t.Fatalf("expected 1 fetch, got %d", fetchCount.Load())
+	}
+
+	// Вторая попытка сразу же — должна попасть под cooldown 15с и вернуть false
+	ok := coord.RefreshCreds(ctx, ctx, "second_immediate", 1)
+	if ok {
+		t.Fatalf("expected false during cooldown")
+	}
+	if fetchCount.Load() != 1 {
+		t.Fatalf("fetch count should remain 1 during cooldown, got %d", fetchCount.Load())
+	}
+}
+

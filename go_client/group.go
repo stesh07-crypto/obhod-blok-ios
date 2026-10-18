@@ -105,97 +105,11 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	}
 
 	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID, Generation: gen, GroupID: groupID}
+	coord := NewGroupCredCoordinator(groupID, hash, credStreamID, creds)
 
 	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %v, %d воркеров", groupID, creds.Generation, creds.TurnURLs, len(workerIDs))
 
 	var wg sync.WaitGroup
-	var credsMu sync.RWMutex
-	var refreshMu sync.Mutex
-	var refreshInFlight bool
-	var refreshCond = sync.NewCond(&refreshMu)
-	var lastCredRefresh atomic.Int64
-
-	refreshCreds := func(reason string, failedGen uint64) bool {
-		refreshMu.Lock()
-		defer refreshMu.Unlock()
-
-		for refreshInFlight {
-			if ctx.Err() != nil {
-				return false
-			}
-			refreshCond.Wait()
-		}
-		if ctx.Err() != nil {
-			return false
-		}
-
-		credsMu.RLock()
-		currentGen := creds.Generation
-		credsMu.RUnlock()
-
-		if failedGen > 0 && currentGen > failedGen {
-			log.Printf("[ГРУППА #%d] [TURN] Локальные креды уже обновлены (актуальное поколение %d > failed=%d, %s)", groupID, currentGen, failedGen, reason)
-			return true
-		}
-
-		// Если в общем кеше уже есть более свежее поколение (полученное другой группой),
-		// забираем его сразу без повторного обращения к VK API.
-		normHash := normalizeVKJoinHash(hash)
-		if normHash == "" {
-			normHash = hash
-		}
-		c := getLinkCache(normHash)
-		c.mutex.RLock()
-		cacheGen := c.creds.Generation
-		cacheValid := c.creds.Link == normHash && time.Now().Before(c.creds.ExpiresAt) && len(c.creds.ServerAddrs) > 0
-		c.mutex.RUnlock()
-
-		if cacheValid && failedGen > 0 && cacheGen > failedGen {
-			u, p, urls, newGen, err := GetCredsWithGen(ctx, hash, credStreamID)
-			if err == nil && newGen > failedGen {
-				credsMu.Lock()
-				creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID, Generation: newGen, GroupID: groupID}
-				credsMu.Unlock()
-				log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша (gen=%d > failed=%d)", groupID, newGen, failedGen)
-				return true
-			}
-		}
-
-		now := time.Now().Unix()
-		last := lastCredRefresh.Load()
-		if last > 0 && now-last < 15 {
-			log.Printf("[ГРУППА #%d] [TURN] Обновление реквизитов отложено: предыдущий запрос был %d сек назад (%s)", groupID, now-last, reason)
-			return false
-		}
-
-		lastCredRefresh.Store(now)
-		refreshInFlight = true
-
-		refreshMu.Unlock()
-		defer func() {
-			refreshMu.Lock()
-			refreshInFlight = false
-			refreshCond.Broadcast()
-			refreshMu.Unlock()
-		}()
-
-		if getVkAuthMode() == "account" {
-			invalidateInjectedTurnCreds(hash)
-		}
-		InvalidateLinkCacheIfGen(hash, failedGen)
-
-		u, p, urls, newGen, refreshErr := GetCredsWithGen(ctx, hash, credStreamID)
-		if refreshErr != nil {
-			log.Printf("[ГРУППА #%d] [TURN] Не удалось обновить реквизиты после %s: %v", groupID, reason, refreshErr)
-			return false
-		}
-
-		credsMu.Lock()
-		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID, Generation: newGen, GroupID: groupID}
-		credsMu.Unlock()
-		log.Printf("[ГРУППА #%d] [TURN] Реквизиты успешно обновлены после %s (gen=%d, urls=%d)", groupID, reason, newGen, len(urls))
-		return true
-	}
 
 
 	for i, wid := range workerIDs {
@@ -233,10 +147,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					cc = configChan
 				}
 
-				credsMu.RLock()
-				credsSnapshot := *creds
-				credsSnapshot.TurnURLs = cloneStringSlice(creds.TurnURLs)
-				credsMu.RUnlock()
+				credsSnapshot := coord.Snapshot(attempt)
 
 				sessionStarted := time.Now()
 				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
@@ -337,8 +248,8 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					case isDtlsTimeout:
 						log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Таймаут рукопожатия DTLS (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					case turnAuthRejected:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d), обновление реквизитов (попытка %d): %s", groupID, wid, turnRelay, credsSnapshot.Generation, attempt, errStr)
-						refreshCreds("TURN auth rejection", credsSnapshot.Generation)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d), обновление реквизитов: %s", groupID, wid, attempt, turnRelay, credsSnapshot.Generation, errStr)
+						coord.RefreshCreds(ctx, ctx, "TURN auth rejection", credsSnapshot.Generation)
 					default:
 						log.Printf("[ГР #%d | ВОРКЕР #%d] Ошибка (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					}
@@ -442,4 +353,150 @@ type Credentials struct {
 	CacheStreamID int
 	Generation    uint64
 	GroupID       int
+	AttemptID     int
+}
+
+type credRefreshOp struct {
+	done chan struct{}
+}
+
+// GroupCredCoordinator управляет реквизитами группы и потокобезопасным однократным обновлением (Single-Flight)
+type GroupCredCoordinator struct {
+	groupID         int
+	hash            string
+	credStreamID    int
+	mu              sync.Mutex
+	credsMu         sync.RWMutex
+	creds           *Credentials
+	activeOp        *credRefreshOp
+	lastRefreshTime int64
+}
+
+func NewGroupCredCoordinator(groupID int, hash string, credStreamID int, initialCreds *Credentials) *GroupCredCoordinator {
+	return &GroupCredCoordinator{
+		groupID:      groupID,
+		hash:         hash,
+		credStreamID: credStreamID,
+		creds:        initialCreds,
+	}
+}
+
+func (c *GroupCredCoordinator) Snapshot(attemptID int) Credentials {
+	c.credsMu.RLock()
+	defer c.credsMu.RUnlock()
+	snap := *c.creds
+	snap.TurnURLs = cloneStringSlice(c.creds.TurnURLs)
+	snap.AttemptID = attemptID
+	return snap
+}
+
+func (c *GroupCredCoordinator) CurrentGeneration() uint64 {
+	c.credsMu.RLock()
+	defer c.credsMu.RUnlock()
+	return c.creds.Generation
+}
+
+func (c *GroupCredCoordinator) RefreshCreds(workerCtx context.Context, groupCtx context.Context, reason string, failedGen uint64) bool {
+	// 1. Проверяем локальные реквизиты группы: если они уже новее, обновление не требуется
+	c.credsMu.RLock()
+	currentGen := c.creds.Generation
+	c.credsMu.RUnlock()
+
+	if failedGen > 0 && currentGen > failedGen {
+		log.Printf("[ГРУППА #%d] [TURN] Локальные креды уже обновлены (актуальное поколение %d > failed=%d, %s)", c.groupID, currentGen, failedGen, reason)
+		return true
+	}
+
+	// 2. Синхронизация через c.mu
+	c.mu.Lock()
+
+	// Повторная проверка поколения под c.mu
+	c.credsMu.RLock()
+	currentGen = c.creds.Generation
+	c.credsMu.RUnlock()
+	if failedGen > 0 && currentGen > failedGen {
+		c.mu.Unlock()
+		return true
+	}
+
+	// Если уже идёт операция обновления другими воркерами — ждём её завершения через канал
+	if c.activeOp != nil {
+		doneCh := c.activeOp.done
+		c.mu.Unlock()
+
+		select {
+		case <-doneCh:
+			c.credsMu.RLock()
+			genAfter := c.creds.Generation
+			c.credsMu.RUnlock()
+			return failedGen == 0 || genAfter > failedGen
+		case <-workerCtx.Done():
+			// Контекст текущего воркера отменён. Он выходит, НЕ прерывая общее обновление для группы
+			return false
+		}
+	}
+
+	// 3. Проверка интервала повторов (15 сек)
+	now := time.Now().Unix()
+	if c.lastRefreshTime > 0 && now-c.lastRefreshTime < 15 {
+		c.mu.Unlock()
+		log.Printf("[ГРУППА #%d] [TURN] Обновление реквизитов отложено: предыдущий запрос был %d сек назад (%s)", c.groupID, now-c.lastRefreshTime, reason)
+		return false
+	}
+
+	// 4. Проверяем общий кеш: если другая группа уже получила более свежее поколение,
+	// забираем его сразу без повторного обращения к VK API.
+	normHash := normalizeVKJoinHash(c.hash)
+	if normHash == "" {
+		normHash = c.hash
+	}
+	linkCache := getLinkCache(normHash)
+	linkCache.mutex.RLock()
+	cacheGen := linkCache.creds.Generation
+	cacheValid := linkCache.creds.Link == normHash && time.Now().Before(linkCache.creds.ExpiresAt) && len(linkCache.creds.ServerAddrs) > 0
+	linkCache.mutex.RUnlock()
+
+	if cacheValid && failedGen > 0 && cacheGen > failedGen {
+		u, p, urls, newGen, err := GetCredsWithGen(workerCtx, c.hash, c.credStreamID)
+		if err == nil && newGen > failedGen {
+			c.credsMu.Lock()
+			c.creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: c.credStreamID, Generation: newGen, GroupID: c.groupID}
+			c.credsMu.Unlock()
+			c.mu.Unlock()
+			log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша (gen=%d > failed=%d)", c.groupID, newGen, failedGen)
+			return true
+		}
+	}
+
+	// 5. Регистрируем новую операцию
+	c.lastRefreshTime = now
+	op := &credRefreshOp{done: make(chan struct{})}
+	c.activeOp = op
+	c.mu.Unlock()
+
+	// Гарантированное завершение операции и закрытие канала ровно один раз
+	defer func() {
+		c.mu.Lock()
+		c.activeOp = nil
+		close(op.done)
+		c.mu.Unlock()
+	}()
+
+	if getVkAuthMode() == "account" {
+		invalidateInjectedTurnCreds(c.hash)
+	}
+	InvalidateLinkCacheIfGen(c.hash, failedGen)
+
+	// Запрос выполняется с контекстом группы, чтобы отмена отдельного воркера не срывала общую операцию
+	u, p, urls, newGen, refreshErr := GetCredsWithGen(groupCtx, c.hash, c.credStreamID)
+	if refreshErr != nil {
+		log.Printf("[ГРУППА #%d] [TURN] Не удалось обновить реквизиты после %s: %v", c.groupID, reason, refreshErr)
+		return false
+	}
+
+	c.credsMu.Lock()
+	c.creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: c.credStreamID, Generation: newGen, GroupID: c.groupID}
+	c.credsMu.Unlock()
+	log.Printf("[ГРУППА #%d] [TURN] Реквизиты успешно обновлены после %s (gen=%d, urls=%d)", c.groupID, reason, newGen, len(urls))
+	return true
 }
