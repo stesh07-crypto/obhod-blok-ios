@@ -109,12 +109,27 @@ type TurnCredentials struct {
 	Generation  uint64
 }
 
+type cacheFetchOp struct {
+	done          chan struct{}
+	cancel        context.CancelFunc
+	waiters       int
+	user          string
+	pass          string
+	addrs         []string
+	gen           uint64
+	err           error
+	startRevision uint64
+}
+
 type StreamCredentialsCache struct {
 	creds         TurnCredentials
 	mutex         sync.RWMutex
 	errorCount    atomic.Int32
 	lastErrorTime atomic.Int64
 	generation    atomic.Uint64
+	revision      atomic.Uint64
+	fetchMu       sync.Mutex
+	activeFetch   *cacheFetchOp
 }
 
 const (
@@ -225,6 +240,7 @@ func InvalidateLinkCacheIfGen(link string, failedGen uint64) bool {
 
 	// Очищаем только реквизиты совпадающего поколения.
 	// Монотонный счётчик поколений cache.generation не обнуляем!
+	cache.revision.Add(1)
 	cache.creds = TurnCredentials{}
 	cache.errorCount.Store(0)
 	cache.lastErrorTime.Store(0)
@@ -276,6 +292,10 @@ func vkDelayRandom(minMs, maxMs int) {
 // ─── Cached credential fetcher ───
 
 func getVkCredsCached(ctx context.Context, link string, streamID int) (string, string, []string, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, 0, err
+	}
+
 	normLink := normalizeVKJoinHash(link)
 	if normLink == "" {
 		normLink = link
@@ -283,6 +303,7 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 	registerStreamLink(streamID, normLink)
 	cache := getLinkCache(normLink)
 
+	// 1. Быстрое чтение под RLock
 	cache.mutex.RLock()
 	if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
 		expires := time.Until(cache.creds.ExpiresAt)
@@ -296,29 +317,116 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 	}
 	cache.mutex.RUnlock()
 
-	cache.mutex.Lock()
-	defer cache.mutex.Unlock()
+	// 2. Координация обновления через fetchMu БЕЗ удержания cache.mutex на время сети
+	cache.fetchMu.Lock()
 
-	// Double-check inside lock
+	// Double-check: возможно, другой поток уже завершил запрос и записал в кеш
+	cache.mutex.RLock()
 	if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
-		return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), cache.creds.Generation, nil
+		u, p := cache.creds.Username, cache.creds.Password
+		addrs := cloneStringSlice(cache.creds.ServerAddrs)
+		gen := cache.creds.Generation
+		cache.mutex.RUnlock()
+		cache.fetchMu.Unlock()
+		return u, p, addrs, gen, nil
+	}
+	cache.mutex.RUnlock()
+
+	// Если уже выполняется запрос для этого ключа — подключаемся к нему
+	var op *cacheFetchOp
+	if cache.activeFetch != nil {
+		op = cache.activeFetch
+		op.waiters++
+		cache.fetchMu.Unlock()
+	} else {
+		// Мы первые: регистрируем операцию
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		op = &cacheFetchOp{
+			done:          make(chan struct{}),
+			cancel:        fetchCancel,
+			waiters:       1,
+			startRevision: cache.revision.Load(),
+		}
+		cache.activeFetch = op
+		cache.fetchMu.Unlock()
+
+		// Запускаем сетевой запрос вне любых блокировок
+		go func() {
+			defer close(op.done)
+			defer fetchCancel()
+
+			user, pass, addrs, err := fetchVkCredsSerialized(fetchCtx, normLink, streamID)
+
+			cache.fetchMu.Lock()
+			if cache.activeFetch == op {
+				cache.activeFetch = nil
+			}
+			cache.fetchMu.Unlock()
+
+			op.user = user
+			op.pass = pass
+			op.addrs = addrs
+			op.err = err
+
+			if err != nil {
+				return
+			}
+
+			// Публикация результата под cache.mutex с проверкой ревизии состояния
+			cache.mutex.Lock()
+			defer cache.mutex.Unlock()
+
+			currentRev := cache.revision.Load()
+			if currentRev != op.startRevision {
+				log.Printf("[VK Auth] Запись реквизитов для %s пропущена: кеш был инвалидирован во время сетевого запроса (было rev=%d, стало rev=%d)",
+					shortHashLog(normLink), op.startRevision, currentRev)
+				op.err = fmt.Errorf("credentials invalidated during in-flight fetch")
+				return
+			}
+
+			newGen := cache.generation.Add(1)
+			cache.revision.Add(1) // инкремент ревизии при обновлении данных
+			cache.creds = TurnCredentials{
+				Username:    user,
+				Password:    pass,
+				ServerAddrs: addrs,
+				ExpiresAt:   time.Now().Add(credentialLifetime - cacheSafetyMargin),
+				Link:        normLink,
+				Generation:  newGen,
+			}
+			op.gen = newGen
+		}()
 	}
 
-	user, pass, addrs, err := fetchVkCredsSerialized(ctx, normLink, streamID)
-	if err != nil {
-		return "", "", nil, 0, err
-	}
+	// 3. Ожидание завершения операции с индивидуальной поддержкой отмены по контексту вызывающего
+	select {
+	case <-op.done:
+		cache.fetchMu.Lock()
+		op.waiters--
+		cache.fetchMu.Unlock()
 
-	newGen := cache.generation.Add(1)
-	cache.creds = TurnCredentials{
-		Username:    user,
-		Password:    pass,
-		ServerAddrs: addrs,
-		ExpiresAt:   time.Now().Add(credentialLifetime - cacheSafetyMargin),
-		Link:        normLink,
-		Generation:  newGen,
+		if op.err != nil {
+			return "", "", nil, 0, op.err
+		}
+		cache.mutex.RLock()
+		if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
+			u, p := cache.creds.Username, cache.creds.Password
+			addrs := cloneStringSlice(cache.creds.ServerAddrs)
+			gen := cache.creds.Generation
+			cache.mutex.RUnlock()
+			return u, p, addrs, gen, nil
+		}
+		cache.mutex.RUnlock()
+		return op.user, op.pass, cloneStringSlice(op.addrs), op.gen, nil
+	case <-ctx.Done():
+		cache.fetchMu.Lock()
+		op.waiters--
+		if op.waiters <= 0 && op.cancel != nil {
+			op.cancel()
+		}
+		cache.fetchMu.Unlock()
+		return "", "", nil, 0, ctx.Err()
 	}
-	return user, pass, cloneStringSlice(addrs), newGen, nil
 }
 
 // ─── Serialized (throttled) fetcher ───

@@ -35,6 +35,11 @@ jobs:
           go-version: '1.23'
           cache-dependency-path: go_client/go.sum
 
+      - name: Run Hermetic Go Tests (-race)
+        run: |
+          cd go_client
+          go test -v -short -race ./...
+
       - name: Select Xcode
         run: |
           echo "=== Available Xcode versions ==="

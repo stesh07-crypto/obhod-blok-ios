@@ -107,10 +107,14 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID, Generation: gen, GroupID: groupID}
 	coord := NewGroupCredCoordinator(groupID, hash, credStreamID, creds)
 
-	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %v, %d воркеров", groupID, creds.Generation, creds.TurnURLs, len(workerIDs))
+	uniqueRelays := make(map[string]struct{})
+	for _, u := range creds.TurnURLs {
+		uniqueRelays[u] = struct{}{}
+	}
+	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %d URL (%d уникальных: %v), %d воркеров",
+		groupID, creds.Generation, len(creds.TurnURLs), len(uniqueRelays), creds.TurnURLs, len(workerIDs))
 
 	var wg sync.WaitGroup
-
 
 	for i, wid := range workerIDs {
 		wg.Add(1)
@@ -130,8 +134,8 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 			}
 
 			shouldGetConfig := (configChan != nil)
-			attempt := 0
-			transientFailures := 0
+			attemptID := 1
+			failureStreak := 0
 
 			for {
 				if ctx.Err() != nil {
@@ -147,12 +151,12 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					cc = configChan
 				}
 
-				credsSnapshot := coord.Snapshot(attempt)
+				credsSnapshot := coord.Snapshot(attemptID)
+				curAttempt := attemptID
+				attemptID++ // Монотонный идентификатор попытки — никогда не сбрасывается!
 
-				sessionStarted := time.Now()
-				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
+				configDelivered, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
 					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
-				sessionLifetime := time.Since(sessionStarted)
 
 				quotaRetry := false
 				transientSocketRetry := false
@@ -170,7 +174,6 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					}
 					errStr := sessErr.Error()
 					errStrLower := strings.ToLower(errStr)
-
 
 					isTurnQuota := strings.Contains(errStr, "TURN_QUOTA") || strings.Contains(errStrLower, "quota") || strings.Contains(errStr, "486")
 					isTurnForbidden := strings.Contains(errStr, "TURN_FORBIDDEN") || (strings.Contains(errStrLower, "forbidden") && !strings.Contains(errStr, "TURN_AUTH_REJECTED"))
@@ -206,66 +209,54 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 					if strings.Contains(errStr, "хеш мёртв") ||
 						strings.Contains(errStr, "FATAL_AUTH") {
-						log.Printf("[ГР #%d | ВОРКЕР #%d] Фатальная ошибка: %s", groupID, wid, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] Фатальная ошибка: %s", groupID, wid, curAttempt, errStr)
 						return
 					}
 
-					// A connection that lived for a meaningful period proves the
-					// network recovered; do not carry old failure streaks forever.
-					if sessionLifetime >= 20*time.Second {
-						attempt = 0
-						transientFailures = 0
-					}
-					attempt++
-
-					if transientSocketRetry {
-						transientFailures++
+					// Время устойчивой работы отсчитывается строго ПОСЛЕ успешного handshake
+					if establishedDur >= 20*time.Second {
+						failureStreak = 0
 					} else {
-						transientFailures = 0
+						failureStreak++
 					}
 
-					turnRelay := ""
+					turnRelay := "unknown"
 					if len(credsSnapshot.TurnURLs) > 0 {
 						turnRelay = credsSnapshot.TurnURLs[wid%len(credsSnapshot.TurnURLs)]
 					}
 
 					switch {
 					case transientSocketRetry:
-						// On iOS Wi-Fi/cellular handoff may invalidate only the local
-						// socket. TURN credentials remain valid, so keep them and retry
-						// without hitting VK authentication again.
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повтор с теми же кредами (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [СЕТЬ] Локальный socket потерян (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isTurnQuota:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Квота relay исчерпана, ждём (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Квота relay исчерпана, ждём (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isTurnForbidden:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Отказ сервера по политике (403 Forbidden, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Отказ сервера по политике (403 Forbidden, relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isTurnStaleNonce:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Устаревший nonce (438 Stale Nonce, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Устаревший nonce (438 Stale Nonce, relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isTurnCapacity:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Недостаток ёмкости сервера (508 Insufficient Capacity, relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Недостаток ёмкости сервера (508 Insufficient Capacity, relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case turnAllocAttrMissing:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Неполный STUN/TURN ответ (relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Неполный STUN/TURN ответ (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isDtlsTimeout:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] [DTLS] Таймаут рукопожатия DTLS (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Таймаут рукопожатия DTLS (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case turnAuthRejected:
-						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d), обновление реквизитов: %s", groupID, wid, attempt, turnRelay, credsSnapshot.Generation, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d, streak=%d), обновление реквизитов: %s",
+							groupID, wid, curAttempt, turnRelay, credsSnapshot.Generation, failureStreak, errStr)
 						coord.RefreshCreds(ctx, ctx, "TURN auth rejection", credsSnapshot.Generation)
 					default:
-						log.Printf("[ГР #%d | ВОРКЕР #%d] Ошибка (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] Ошибка (relay=%s, streak=%d): %s",
+							groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					}
 
-					// Authentication/flood-control failures may require user/hash
-					// intervention. A local socket failure is deliberately NOT in
-					// this category because mobile interface changes are recoverable.
 					isUnrecoverableRemoteFailure := strings.Contains(errStrLower, "error 29")
 					if isUnrecoverableRemoteFailure {
 						log.Printf("[ВОРКЕР #%d] Невосстановимая удалённая ошибка, завершение: %s", wid, errStr)
 						return
 					}
 				} else {
-					// A cleanly completed session also breaks a failure streak.
-					attempt = 0
-					transientFailures = 0
+					// Чисто завершённая сессия
+					failureStreak = 0
 				}
 
 				if ctx.Err() != nil {
@@ -274,11 +265,9 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
 				if transientSocketRetry {
-					if transientFailures >= 3 {
-						// The device is probably offline rather than merely switching
-						// interfaces. Back off to protect battery and VK/TURN quota.
+					if failureStreak >= 3 {
 						retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
-						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Сеть долго недоступна; dormancy %v", wid, retryDelay)
+						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Сеть долго недоступна (streak=%d); dormancy %v", wid, failureStreak, retryDelay)
 					} else {
 						retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
 					}
@@ -407,16 +396,57 @@ func (c *GroupCredCoordinator) RefreshCreds(workerCtx context.Context, groupCtx 
 		return true
 	}
 
-	// 2. Синхронизация через c.mu
+	// 2. Проверяем общий кеш ДО сетевого кулдауна: если другая группа уже получила более свежее поколение,
+	// забираем его сразу из памяти без повторного сетевого обращения к VK API и без ожидания 15 сек.
+	normHash := normalizeVKJoinHash(c.hash)
+	if normHash == "" {
+		normHash = c.hash
+	}
+	linkCache := getLinkCache(normHash)
+	linkCache.mutex.RLock()
+	cacheGen := linkCache.creds.Generation
+	cacheValid := linkCache.creds.Link == normHash && time.Now().Before(linkCache.creds.ExpiresAt) && len(linkCache.creds.ServerAddrs) > 0
+	linkCache.mutex.RUnlock()
+
+	if cacheValid && failedGen > 0 && cacheGen > failedGen {
+		u, p, urls, newGen, err := GetCredsWithGen(workerCtx, c.hash, c.credStreamID)
+		if err == nil && newGen > failedGen {
+			c.credsMu.Lock()
+			c.creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: c.credStreamID, Generation: newGen, GroupID: c.groupID}
+			c.credsMu.Unlock()
+			log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша до кулдауна (gen=%d > failed=%d)", c.groupID, newGen, failedGen)
+			return true
+		}
+	}
+
+	// 3. Синхронизация через c.mu
 	c.mu.Lock()
 
-	// Повторная проверка поколения под c.mu
+	// Повторная проверка локального поколения под c.mu
 	c.credsMu.RLock()
 	currentGen = c.creds.Generation
 	c.credsMu.RUnlock()
 	if failedGen > 0 && currentGen > failedGen {
 		c.mu.Unlock()
 		return true
+	}
+
+	// Повторная проверка общего кеша под c.mu (вдруг кеш обновился, пока мы ждали c.mu)
+	linkCache.mutex.RLock()
+	cacheGen = linkCache.creds.Generation
+	cacheValid = linkCache.creds.Link == normHash && time.Now().Before(linkCache.creds.ExpiresAt) && len(linkCache.creds.ServerAddrs) > 0
+	linkCache.mutex.RUnlock()
+
+	if cacheValid && failedGen > 0 && cacheGen > failedGen {
+		u, p, urls, newGen, err := GetCredsWithGen(workerCtx, c.hash, c.credStreamID)
+		if err == nil && newGen > failedGen {
+			c.credsMu.Lock()
+			c.creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: c.credStreamID, Generation: newGen, GroupID: c.groupID}
+			c.credsMu.Unlock()
+			c.mu.Unlock()
+			log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша под замком (gen=%d > failed=%d)", c.groupID, newGen, failedGen)
+			return true
+		}
 	}
 
 	// Если уже идёт операция обновления другими воркерами — ждём её завершения через канал
@@ -436,36 +466,12 @@ func (c *GroupCredCoordinator) RefreshCreds(workerCtx context.Context, groupCtx 
 		}
 	}
 
-	// 3. Проверка интервала повторов (15 сек)
+	// 4. Проверка интервала повторов сетевого запроса к VK API (15 сек)
 	now := time.Now().Unix()
 	if c.lastRefreshTime > 0 && now-c.lastRefreshTime < 15 {
 		c.mu.Unlock()
-		log.Printf("[ГРУППА #%d] [TURN] Обновление реквизитов отложено: предыдущий запрос был %d сек назад (%s)", c.groupID, now-c.lastRefreshTime, reason)
+		log.Printf("[ГРУППА #%d] [TURN] Сетевой запрос к VK API отложен: предыдущий был %d сек назад (%s)", c.groupID, now-c.lastRefreshTime, reason)
 		return false
-	}
-
-	// 4. Проверяем общий кеш: если другая группа уже получила более свежее поколение,
-	// забираем его сразу без повторного обращения к VK API.
-	normHash := normalizeVKJoinHash(c.hash)
-	if normHash == "" {
-		normHash = c.hash
-	}
-	linkCache := getLinkCache(normHash)
-	linkCache.mutex.RLock()
-	cacheGen := linkCache.creds.Generation
-	cacheValid := linkCache.creds.Link == normHash && time.Now().Before(linkCache.creds.ExpiresAt) && len(linkCache.creds.ServerAddrs) > 0
-	linkCache.mutex.RUnlock()
-
-	if cacheValid && failedGen > 0 && cacheGen > failedGen {
-		u, p, urls, newGen, err := GetCredsWithGen(workerCtx, c.hash, c.credStreamID)
-		if err == nil && newGen > failedGen {
-			c.credsMu.Lock()
-			c.creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: c.credStreamID, Generation: newGen, GroupID: c.groupID}
-			c.credsMu.Unlock()
-			c.mu.Unlock()
-			log.Printf("[ГРУППА #%d] [TURN] Получены новые реквизиты из общего кеша (gen=%d > failed=%d)", c.groupID, newGen, failedGen)
-			return true
-		}
 	}
 
 	// 5. Регистрируем новую операцию

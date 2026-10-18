@@ -33,15 +33,29 @@ const (
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
-var (
-	handshakeSem       = make(chan struct{}, 3)
-	HandshakesInFlight atomic.Int32
-	HandshakesWaiting  atomic.Int32
-	HandshakeSuccess   atomic.Int64
-	HandshakeTimeout   atomic.Int64
-	HandshakeCanceled  atomic.Int64
-	HandshakeErrors    atomic.Int64
+const (
+	HandshakeTimeoutDefault    = 50 * time.Second
+	HandshakeTimeoutExperiment = 20 * time.Second
 )
+
+var (
+	CurrentHandshakeTimeout = HandshakeTimeoutDefault
+	handshakeSem            = make(chan struct{}, 3)
+	HandshakesInFlight      atomic.Int32
+	HandshakesWaiting       atomic.Int32
+	HandshakeSuccess        atomic.Int64
+	HandshakeTimeout        atomic.Int64
+	HandshakeCanceled       atomic.Int64
+	HandshakeErrors         atomic.Int64
+)
+
+func init() {
+	modeStr := "контрольный"
+	if CurrentHandshakeTimeout == HandshakeTimeoutExperiment {
+		modeStr = "экспериментальный"
+	}
+	log.Printf("[DTLS] Режим таймаута рукопожатия: %v (%s), семафор: 3 слота", CurrentHandshakeTimeout, modeStr)
+}
 
 // NullLoggerFactory подавляет логи pion
 type NullLoggerFactory struct{}
@@ -104,7 +118,7 @@ func RunSession(
 	creds *Credentials,
 	deviceID, password string,
 	stats *Stats,
-) (bool, error) {
+) (bool, time.Duration, error) {
 	configDelivered := false
 	var firstWrapUp uint32
 	var firstWrapDown uint32
@@ -112,13 +126,13 @@ func RunSession(
 	var firstDtlsRead uint32
 
 	if len(creds.TurnURLs) == 0 {
-		return false, fmt.Errorf("нет TURN URL в учетных данных")
+		return false, 0, fmt.Errorf("нет TURN URL в учетных данных")
 	}
 	selectedURL := creds.TurnURLs[sessionID%len(creds.TurnURLs)]
 
 	urlhost, urlport, err := net.SplitHostPort(selectedURL)
 	if err != nil {
-		return false, fmt.Errorf("разбор TURN URL %q: %w", selectedURL, err)
+		return false, 0, fmt.Errorf("разбор TURN URL %q: %w", selectedURL, err)
 	}
 	if tp.Host != "" {
 		urlhost = tp.Host
@@ -131,11 +145,11 @@ func RunSession(
 	// Транспорт: всегда UDP
 	resolved, err := net.ResolveUDPAddr("udp", turnAddr)
 	if err != nil {
-		return false, fmt.Errorf("резолв TURN: %w", err)
+		return false, 0, fmt.Errorf("резолв TURN: %w", err)
 	}
 	c, err := net.DialUDP("udp", nil, resolved)
 	if err != nil {
-		return false, fmt.Errorf("подключение TURN UDP: %w", err)
+		return false, 0, fmt.Errorf("подключение TURN UDP: %w", err)
 	}
 	defer c.Close()
 	_ = c.SetReadBuffer(socketBufSize)
@@ -167,12 +181,12 @@ func RunSession(
 		LoggerFactory:          &NullLoggerFactory{},
 	})
 	if err != nil {
-		return false, fmt.Errorf("TURN клиент: %w", err)
+		return false, 0, fmt.Errorf("TURN клиент: %w", err)
 	}
 	defer tc.Close()
 
 	if err = tc.Listen(); err != nil {
-		return false, fmt.Errorf("TURN Listen: %w", err)
+		return false, 0, fmt.Errorf("TURN Listen: %w", err)
 	}
 
 	relay, err := tc.Allocate()
@@ -181,40 +195,40 @@ func RunSession(
 		if errors.As(err, &turnErr) {
 			switch turnErr.ErrorCodeAttr.Code {
 			case stun.CodeUnauthorized, stun.CodeWrongCredentials:
-				return false, fmt.Errorf("TURN_AUTH_REJECTED (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
+				return false, 0, fmt.Errorf("TURN_AUTH_REJECTED (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
 			case stun.CodeForbidden:
-				return false, fmt.Errorf("TURN_FORBIDDEN (код 403): %w", err)
+				return false, 0, fmt.Errorf("TURN_FORBIDDEN (код 403): %w", err)
 			case stun.CodeStaleNonce:
-				return false, fmt.Errorf("TURN_STALE_NONCE (код 438): %w", err)
+				return false, 0, fmt.Errorf("TURN_STALE_NONCE (код 438): %w", err)
 			case stun.CodeAllocQuotaReached:
-				return false, fmt.Errorf("TURN_QUOTA (код 486): %w", err)
+				return false, 0, fmt.Errorf("TURN_QUOTA (код 486): %w", err)
 			case stun.CodeInsufficientCapacity:
-				return false, fmt.Errorf("TURN_CAPACITY (код 508): %w", err)
+				return false, 0, fmt.Errorf("TURN_CAPACITY (код 508): %w", err)
 			default:
-				return false, fmt.Errorf("TURN_ERROR (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
+				return false, 0, fmt.Errorf("TURN_ERROR (код %d): %w", turnErr.ErrorCodeAttr.Code, err)
 			}
 		}
 		if errors.Is(err, stun.ErrAttributeNotFound) || strings.Contains(strings.ToLower(err.Error()), "attribute not found") {
-			return false, fmt.Errorf("TURN_ATTR_NOT_FOUND (неполный ответ или отсутствие обязательного атрибута STUN/TURN): %w", err)
+			return false, 0, fmt.Errorf("TURN_ATTR_NOT_FOUND (неполный ответ или отсутствие обязательного атрибута STUN/TURN): %w", err)
 		}
 		errStr := err.Error()
 		errStrLower := strings.ToLower(errStr)
 		if strings.Contains(errStr, "401") || strings.Contains(errStr, "441") || strings.Contains(errStrLower, "unauthorized") || strings.Contains(errStrLower, "wrong credentials") {
-			return false, fmt.Errorf("TURN_AUTH_REJECTED: %w", err)
+			return false, 0, fmt.Errorf("TURN_AUTH_REJECTED: %w", err)
 		}
 		if strings.Contains(errStr, "403") || strings.Contains(errStrLower, "forbidden") {
-			return false, fmt.Errorf("TURN_FORBIDDEN: %w", err)
+			return false, 0, fmt.Errorf("TURN_FORBIDDEN: %w", err)
 		}
 		if strings.Contains(errStr, "438") || strings.Contains(errStrLower, "stale nonce") {
-			return false, fmt.Errorf("TURN_STALE_NONCE: %w", err)
+			return false, 0, fmt.Errorf("TURN_STALE_NONCE: %w", err)
 		}
 		if strings.Contains(errStr, "486") || strings.Contains(errStrLower, "quota") {
-			return false, fmt.Errorf("TURN_QUOTA: %w", err)
+			return false, 0, fmt.Errorf("TURN_QUOTA: %w", err)
 		}
 		if strings.Contains(errStr, "508") || strings.Contains(errStrLower, "capacity") {
-			return false, fmt.Errorf("TURN_CAPACITY: %w", err)
+			return false, 0, fmt.Errorf("TURN_CAPACITY: %w", err)
 		}
-		return false, fmt.Errorf("TURN Allocate (%s): %w", turnAddr, err)
+		return false, 0, fmt.Errorf("TURN Allocate (%s): %w", turnAddr, err)
 	}
 	defer func() {
 		relay.Close()
@@ -344,7 +358,7 @@ func RunSession(
 	// DTLS с поддержкой Connection ID (без SNI)
 	cert, err := selfsign.GenerateSelfSigned()
 	if err != nil {
-		return false, fmt.Errorf("генерация сертификата: %w", err)
+		return false, 0, fmt.Errorf("генерация сертификата: %w", err)
 	}
 
 	// Acquire handshake semaphore
@@ -359,7 +373,7 @@ func RunSession(
 		semWait := time.Since(semStart)
 		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Ожидание слота отменено (очередь=%v, в_очереди=%d, hs_активно=%d): %v",
 			creds.GroupID, sessionID, creds.AttemptID, semWait.Round(time.Millisecond), HandshakesWaiting.Load(), HandshakesInFlight.Load(), sessCtx.Err())
-		return false, fmt.Errorf("DTLS семафор отменён (очередь=%v): %w", semWait.Round(time.Millisecond), sessCtx.Err())
+		return false, 0, fmt.Errorf("DTLS семафор отменён (очередь=%v): %w", semWait.Round(time.Millisecond), sessCtx.Err())
 	}
 	semWait := time.Since(semStart)
 	HandshakesInFlight.Add(1)
@@ -379,11 +393,11 @@ func RunSession(
 		<-handshakeSem
 		HandshakesInFlight.Add(-1)
 		HandshakeErrors.Add(1)
-		return false, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
+		return false, 0, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
 	}
 	defer dtlsConn.Close()
 
-	hctx, hcancel := context.WithTimeout(sessCtx, 50*time.Second)
+	hctx, hcancel := context.WithTimeout(sessCtx, CurrentHandshakeTimeout)
 	hsStart := time.Now()
 	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Рукопожатие начато... (relay=%s, gen=%d, очередь=%v, hs_активно=%d, в_очереди=%d)",
 		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load())
@@ -397,7 +411,7 @@ func RunSession(
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
 			HandshakeTimeout.Add(1)
-			return false, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
+			return false, 0, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
 				turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
 		}
 		if sessCtx.Err() != nil {
@@ -405,9 +419,10 @@ func RunSession(
 		} else {
 			HandshakeErrors.Add(1)
 		}
-		return false, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
+		return false, 0, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
 	}
 	HandshakeSuccess.Add(1)
+	establishedStart := time.Now()
 	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
 		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
 
@@ -420,7 +435,7 @@ func RunSession(
 		if confErr != nil {
 			errStr := confErr.Error()
 			if strings.Contains(errStr, "FATAL_AUTH") {
-				return false, confErr
+				return false, time.Since(establishedStart), confErr
 			}
 			log.Printf("[ВОРКЕР #%d] Ошибка конфига: %v", sessionID, confErr)
 		} else if conf != "" {
@@ -554,8 +569,8 @@ func RunSession(
 	sessionWg.Wait()
 	_ = pipeA.Close()
 	_ = pipeB.Close()
-	log.Printf("[СЕССИЯ #%d] Завершена", sessionID)
-	return configDelivered, nil
+	log.Printf("[СЕССИЯ #%d] Завершена (активность после handshake=%v)", sessionID, time.Since(establishedStart).Round(time.Millisecond))
+	return configDelivered, time.Since(establishedStart), nil
 }
 
 func RunPing(

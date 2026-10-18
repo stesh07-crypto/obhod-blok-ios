@@ -637,3 +637,181 @@ func TestCoordinator_EarlyReturnCooldown(t *testing.T) {
 	}
 }
 
+// ─── Tests for Cache Revision Guard & Outside-Mutex Fetch ───
+
+// 11. Запрос, начавшийся до сброса кеша, не перезаписывает состояние устаревшими данными (Revision Guard)
+func TestCredsCache_RevisionProtectsAgainstStaleOverwrite(t *testing.T) {
+	link := "https://vk.com/call/join/test_cache_revision_guard"
+	resetLinkCache(link)
+
+	fetchStarted := make(chan struct{})
+	fetchRelease := make(chan struct{})
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		<-fetchRelease
+		return "stale_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+
+	// Запускаем фоновый запрос 1
+	var fetch1Gen uint64
+	var fetch1Err error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, _, fetch1Gen, fetch1Err = GetCredsWithGen(ctx, link, 1)
+	}()
+
+	// Ждем пока запрос 1 стартует
+	<-fetchStarted
+
+	// Пока запрос 1 в воздухе, происходит инвалидация/сброс кеша
+	cache := getLinkCache(link)
+	cache.revision.Add(1) // имитация внешней инвалидации или смены ревизии
+
+	// Разрешаем первому запросу завершиться
+	close(fetchRelease)
+	wg.Wait()
+
+	// Первый запрос должен был получить ошибку invalidation
+	if fetch1Err == nil {
+		t.Fatalf("expected error from fetch1 due to revision mismatch, got gen=%d", fetch1Gen)
+	}
+
+	// Кеш должен остаться пустым, stale_user не должен быть записан!
+	cache.mutex.RLock()
+	hasUser := cache.creds.Username
+	cache.mutex.RUnlock()
+
+	if hasUser != "" {
+		t.Fatalf("expected cache to NOT contain stale user, but found %q", hasUser)
+	}
+
+	// Последующий штатный запрос должен успешно выполниться
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		return "fresh_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	u, _, _, gen, err := GetCredsWithGen(ctx, link, 2)
+	if err != nil || u != "fresh_user" || gen != 1 {
+		t.Fatalf("expected fresh_user with gen=1, got user=%s gen=%d err=%v", u, gen, err)
+	}
+}
+
+// 12. Отмена одного ожидающего воркера не ломает запрос для других параллельных воркеров
+func TestCredsCache_WaitersCanCancelIndividually(t *testing.T) {
+	link := "https://vk.com/call/join/test_cache_cancelable_waiters"
+	resetLinkCache(link)
+
+	fetchStarted := make(chan struct{})
+	fetchRelease := make(chan struct{})
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		<-fetchRelease
+		return "shared_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+
+	// Воркер 1: нормальный контекст
+	var w1User string
+	var w1Gen uint64
+	var w1Err error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w1User, _, _, w1Gen, w1Err = GetCredsWithGen(ctx, link, 1)
+	}()
+
+	<-fetchStarted
+
+	// Воркер 2: контекст с немедленной отменой
+	w2Ctx, cancel2 := context.WithCancel(ctx)
+	cancel2()
+
+	_, _, _, _, w2Err := GetCredsWithGen(w2Ctx, link, 2)
+	if !errors.Is(w2Err, context.Canceled) {
+		t.Fatalf("expected w2 to receive context.Canceled, got %v", w2Err)
+	}
+
+	// Разрешаем сетевому запросу закончиться
+	close(fetchRelease)
+	wg.Wait()
+
+	if w1Err != nil || w1User != "shared_user" || w1Gen != 1 {
+		t.Fatalf("expected w1 to succeed with shared_user gen 1, got user=%s gen=%d err=%v", w1User, w1Gen, w1Err)
+	}
+}
+
+// 13. Координатор забирает новое поколение из linkCache ДО проверки 15с кулдауна
+func TestCoordinator_EarlyConsumeLinkCacheBeforeCooldown(t *testing.T) {
+	link := "https://vk.com/call/join/test_coord_early_linkcache"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		c := fetchCount.Add(1)
+		return fmt.Sprintf("vk_user_%d", c), "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+	// Инициализируем группу 1 с поколением 1
+	initCreds := &Credentials{User: "vk_user_1", Pass: "pass", TurnURLs: []string{"193.203.43.46:19302"}, CacheStreamID: 100, Generation: 1, GroupID: 1}
+	coord := NewGroupCredCoordinator(1, link, 100, initCreds)
+
+	// Устанавливаем lastRefreshTime на текущее время (как будто был недавний запрос)
+	coord.mu.Lock()
+	coord.lastRefreshTime = time.Now().Unix()
+	coord.mu.Unlock()
+
+	// Теперь другая группа (или процесс) обновила общий linkCache до gen 2
+	normLink := normalizeVKJoinHash(link)
+	if normLink == "" {
+		normLink = link
+	}
+	cache := getLinkCache(normLink)
+	cache.mutex.Lock()
+	cache.generation.Store(2)
+	cache.creds = TurnCredentials{
+		Username:    "shared_user_gen2",
+		Password:    "pass",
+		ServerAddrs: []string{"193.203.43.46:19302"},
+		ExpiresAt:   time.Now().Add(10 * time.Minute),
+		Link:        normLink,
+		Generation:  2,
+	}
+	cache.mutex.Unlock()
+
+	// Группа 1 вызывает RefreshCreds(failedGen = 1).
+	// Несмотря на то, что lastRefreshTime = now (< 15s cooldown),
+	// метод должен СРАЗУ вернуть true и обновить c.creds до gen 2 из linkCache!
+	ok := coord.RefreshCreds(ctx, ctx, "check_before_cooldown", 1)
+	if !ok {
+		t.Fatalf("expected RefreshCreds to return true by consuming linkCache before cooldown")
+	}
+
+	snap := coord.Snapshot(0)
+	if snap.Generation != 2 || snap.User != "shared_user_gen2" {
+		t.Fatalf("expected snap gen=2 with shared_user_gen2, got gen=%d, user=%s", snap.Generation, snap.User)
+	}
+
+	// Никаких дополнительных сетевых запросов не должно было быть сделано
+	if fetchCount.Load() != 0 {
+		t.Fatalf("expected 0 network fetches, got %d", fetchCount.Load())
+	}
+}
