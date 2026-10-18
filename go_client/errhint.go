@@ -11,8 +11,8 @@ func workerErrorHint(err error) string {
 	switch {
 	case strings.Contains(text, "wrap_auth_timeout"):
 		return "сервер не ответил на WRAP/DTLS — проверьте пароль, IP/порт и что wdtt-server запущен"
-	case strings.Contains(text, "context canceled"):
-		return "соединение прервано до handshake — часто сервер недоступен, UDP режет оператор или сменилась сеть"
+	case strings.Contains(text, "canceled") || strings.Contains(text, "cancelled"):
+		return "соединение прервано до завершения операции"
 	case strings.Contains(text, "context deadline exceeded"):
 		return "таймаут handshake — сервер не отвечает, проверьте VPS, файрвол и пароль WRAP"
 	case strings.Contains(text, "deadline exceeded") || strings.Contains(text, "timeout") || strings.Contains(text, "i/o timeout"):
@@ -29,8 +29,8 @@ func workerErrorHint(err error) string {
 		return "VK исчерпал TURN-слоты — уменьшите потоки или смените VK-хеш/аккаунт"
 	case strings.Contains(text, "turn allocate"):
 		return "ошибка TURN relay — VK может резать UDP; попробуйте другой хеш или режим капчи"
-	case strings.Contains(text, "rate limit") || strings.Contains(text, "flood") || strings.Contains(text, "error 29"):
-		return "VK временно ограничил запросы — подождите или смените IP/хеш"
+	case strings.Contains(text, "rate limit") || strings.Contains(text, "flood") || strings.Contains(text, "error 29") || strings.Contains(text, "error_code=9") || strings.Contains(text, "error_code: 9"):
+		return "VK временно ограничил запросы (Flood Control) — шлюз ожидает кулдаун перед повтором"
 	case strings.Contains(text, "rtp aead") || strings.Contains(text, "auth failed") || strings.Contains(text, "tag mismatch"):
 		return "ошибка WRAP/RTP — неверный пароль или несовместимая версия сервера"
 	case strings.Contains(text, "fatal_auth") || strings.Contains(text, "неверный пароль"):

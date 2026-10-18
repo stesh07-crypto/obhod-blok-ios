@@ -328,7 +328,8 @@ func WDTT_Start(
 		iosLog(fmt.Sprintf("[СЕТЬ] Маскировка: %s", obfsModeDisplay(obfsStr)), false)
 		iosLog(fmt.Sprintf("[КЛИЕНТ] Режим VK: %s", anonPath), false)
 
-		iosLog("[СЕТЬ] Проверка DNS...", false)
+		iosLog("[СЕТЬ] Настройка DNS...", false)
+		setupGlobalResolver(dnsStr)
 		dnsOK, dnsMsg := checkDNS(rt.ctx, dnsStr)
 		if !dnsOK {
 			iosLog(fmt.Sprintf("[СЕТЬ] Предупреждение DNS: %s (используем системный DNS)", dnsMsg), false)
@@ -638,15 +639,16 @@ func GoDnsProbeCheck(ctx context.Context, dnsArg string) DnsProbeResult {
 	if dnsArg == "" {
 		return DnsProbeResult{Reachable: true, StatusText: "OK"}
 	}
-	host := parseDnsTarget(dnsArg)
-	dialer := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "udp", host)
-	if err != nil {
-		return DnsProbeResult{Reachable: false, StatusText: err.Error()}
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupHost(checkCtx, "login.vk.com")
+	if err != nil || len(addrs) == 0 {
+		return DnsProbeResult{Reachable: false, StatusText: fmt.Sprintf("сбой резолва: %v", err)}
 	}
-	_ = conn.Close()
-	return DnsProbeResult{Reachable: true, StatusText: "OK"}
+	return DnsProbeResult{Reachable: true, StatusText: fmt.Sprintf("OK (%s -> %s)", dnsArg, addrs[0])}
 }
+
 
 // ── Main transport loop ─────────────────────────────────────────────────────
 
@@ -903,6 +905,12 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 	}
 
 	logFn("[ГО-ВОРКЕР] Все воркеры завершены", false)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if stats != nil && stats.ActiveConnections.Load() == 0 {
+		return fmt.Errorf("все воркеры завершились или не смогли подключиться")
+	}
 	return nil
 }
 

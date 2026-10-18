@@ -225,7 +225,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        if line.contains("[IOS-TUN] WireGuard поднят") {
+        if line.contains("[IOS-TUN] WireGuard поднят") || line.contains("Соединение установлено") {
             disarmRecoveryWatchdog()
             defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
             return
@@ -242,12 +242,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         recoveryWatchdogWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.defaults?.bool(forKey: AppGroup.Keys.transportRecovering) == true else { return }
-            self.appendLog("[СЕТЬ] Таймаут восстановления транспорта (8с); сбрасываем флаг восстановления", isError: false)
-            self.defaults?.set(false, forKey: AppGroup.Keys.transportRecovering)
+            self.appendLog("[СЕТЬ] Восстановление транспорта продолжается; инициируем проверку здоровья", isError: false)
             GoClient.wakeHealthCheck()
         }
         recoveryWatchdogWorkItem = item
-        workQueue.asyncAfter(deadline: .now() + 8.0, execute: item)
+        workQueue.asyncAfter(deadline: .now() + 30.0, execute: item)
     }
 
     private func disarmRecoveryWatchdog() {

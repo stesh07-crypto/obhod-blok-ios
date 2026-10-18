@@ -291,11 +291,6 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 
 	user, pass, addrs, err := fetchVkCredsSerialized(ctx, normLink, streamID)
 	if err != nil {
-		// If fetch failed due to temporary flood or network, but we have existing cached creds (even recently expired by <= 15m), reuse them!
-		if cache.creds.Username != "" && len(cache.creds.ServerAddrs) > 0 && time.Since(cache.creds.ExpiresAt) < 15*time.Minute {
-			log.Printf("[STREAM %d] [VK Auth] Fetch error (%v), but reusing existing cached credentials for %s...", streamID, err, shortHashLog(normLink))
-			return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), nil
-		}
 		return "", "", nil, err
 	}
 
@@ -317,11 +312,31 @@ var (
 )
 
 func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+	// 1. Проверяем FloodGate перед блокировкой мьютекса
+	isProbe, err := GlobalFloodGate.Acquire(ctx, streamID)
+	if err != nil {
+		return "", "", nil, err
+	}
+	probeDone := false
+	defer func() {
+		if isProbe && !probeDone {
+			GlobalFloodGate.ReleaseProbe(streamID)
+		}
+	}()
+
 	vkRequestMu.Lock()
 	defer vkRequestMu.Unlock()
 
-	// Throttle: 1.2-2.0 seconds between distinct VK API requests
-	minInterval := 1200*time.Millisecond + time.Duration(rand.Intn(800))*time.Millisecond
+	// Повторная проверка контекста и общей паузы после получения блокировки мьютекса
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, err
+	}
+	if GlobalFloodGate.IsFlooded() {
+		return "", "", nil, &FloodControlError{Err: fmt.Errorf("global flood control active")}
+	}
+
+	// Throttle: 3-6 seconds between requests (Build 177)
+	minInterval := 3*time.Second + time.Duration(rand.Intn(3000))*time.Millisecond
 	elapsed := time.Since(globalLastVkFetchTime)
 
 	if !globalLastVkFetchTime.IsZero() && elapsed < minInterval {
@@ -332,13 +347,32 @@ func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (str
 			return "", "", nil, ctx.Err()
 		case <-time.After(wait):
 		}
+
+		if err := ctx.Err(); err != nil {
+			return "", "", nil, err
+		}
+		if GlobalFloodGate.IsFlooded() {
+			return "", "", nil, &FloodControlError{Err: fmt.Errorf("global flood control active")}
+		}
 	}
 
 	defer func() {
 		globalLastVkFetchTime = time.Now()
 	}()
 
-	return fetchVkCreds(ctx, link, streamID)
+	user, pass, addrs, fetchErr := fetchVkCreds(ctx, link, streamID)
+	if fetchErr != nil {
+		if IsFloodControl(fetchErr) {
+			probeDone = true
+			GlobalFloodGate.ReportFlood(streamID, fetchErr)
+		}
+		return "", "", nil, fetchErr
+	}
+
+	// Успешный запрос сбрасывает состояние flood control
+	probeDone = true
+	GlobalFloodGate.ReportSuccess(streamID)
+	return user, pass, addrs, nil
 }
 
 // ─── Main credential fetcher (rotates through stable credential sets) ───
@@ -361,16 +395,16 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 				log.Printf("[STREAM %d] [VK Auth] VK Calls path returned non-retryable call error: %v", streamID, callErr)
 				return "", "", nil, callErr
 			}
-			errStr := err.Error()
-			if strings.Contains(errStr, "Flood control") || strings.Contains(errStr, "error_code=9") || strings.Contains(errStr, "error_code: 9") {
+			if IsFloodControl(err) {
 				log.Printf("[STREAM %d] [VK Auth] VK Calls flood control detected: %v (cooldown, do not fallback to legacy)", streamID, err)
-				return "", "", nil, fmt.Errorf("VK_FLOOD_CONTROL: %w", err)
+				return "", "", nil, &FloodControlError{Err: err}
 			}
 			log.Printf("[STREAM %d] [VK Auth] VK Calls path failed (%s), falling back to legacy", streamID, describeVKCallsFailure(err))
 		}
 	} else {
 		log.Printf("[STREAM %d] [VK Auth] Legacy path selected, skipping VK Calls", streamID)
 	}
+
 
 	var lastErr error
 	jar := tlsclient.NewCookieJar()

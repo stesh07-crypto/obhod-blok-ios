@@ -35,9 +35,9 @@ const (
 var (
 	rePowIIFEArgs         = regexp.MustCompile(`\}\(\s*["']([A-Za-z0-9+/=_-]{8,})["']\s*,\s*(\d+)\s*,\s*["'][^"']*["']\s*(?:,|\)\s*\))`)
 	reVKGlobalStart       = regexp.MustCompile(`window\.vk\s*=\s*\{`)
-	reVKGlobalUUID        = regexp.MustCompile(`[A-Za-z_$][\w$]*\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"`)
-	reVKGlobalLang        = regexp.MustCompile(`\blang\s*:\s*(\d+)\b`)
-	rePowTelemetry        = regexp.MustCompile(`["']tel_hash["']\s*:`)
+	reVKGlobalUUID        = regexp.MustCompile(`(?:"[A-Za-z_$][\w$]*"|[A-Za-z_$][\w$]*)\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"`)
+	reVKGlobalLang        = regexp.MustCompile(`(?:"lang"|\blang)\s*:\s*(\d+)\b`)
+	rePowTelemetry        = regexp.MustCompile(`(?:["']tel_hash["']\s*:|\btel_hash\b)`)
 
 	reCaptchaV2PowInput   = regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
 	reCaptchaV2Difficulty = regexp.MustCompile(`const\s+difficulty\s*=\s*(\d+)`)

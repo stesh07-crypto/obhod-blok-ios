@@ -473,14 +473,11 @@ final class TunnelManager: ObservableObject {
             if recovering {
                 if recoveringSince == nil {
                     recoveringSince = Date()
-                } else if let since = recoveringSince, Date().timeIntervalSince(since) > 10.0 {
+                } else if let since = recoveringSince, Date().timeIntervalSince(since) > 45.0 {
                     // Watchdog: clear zombie recovering state in AppGroup and UI
                     defaults.set(false, forKey: AppGroup.Keys.transportRecovering)
                     recoveringSince = nil
                     isTransportRecovering = false
-                    if isRunning && (stats == "Переподключение…" || stats.contains("Переподключ")) {
-                        stats = "Подключено"
-                    }
                 } else if isTransportRecovering != recovering {
                     isTransportRecovering = recovering
                 }

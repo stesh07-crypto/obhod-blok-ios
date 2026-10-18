@@ -17,6 +17,16 @@ const workersPerGroup = 9
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
 func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, peer *net.UDPAddr, d *Dispatcher, localPort string,
 	configChan chan<- string, workerIDs []int, pauseFlag *int32, deviceID, password string, stats *Stats, waitReady <-chan struct{}, signalReady chan<- struct{}, configSent *int32, configRequestInFlight *int32) {
+	var signalOnce sync.Once
+	releaseSignalReady := func() {
+		if signalReady != nil {
+			signalOnce.Do(func() {
+				close(signalReady)
+			})
+		}
+	}
+	defer releaseSignalReady()
+
 	// Каскадный запуск: ждем свою очередь
 	if waitReady != nil {
 		log.Printf("[ГРУППА #%d] Ожидание сигнала от предыдущей группы...", groupID)
@@ -46,34 +56,53 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	var user, pass string
 	var turnURLs []string
 	var err error
-	for credAttempt := 1; credAttempt <= 3; credAttempt++ {
-		user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
-		if err == nil {
-			break
-		}
-		if ctx.Err() != nil {
-			if signalReady != nil {
-				close(signalReady)
-			}
-			return
-		}
-		log.Printf("[ГРУППА #%d] Попытка %d получения кредов не удалась: %v", groupID, credAttempt, err)
-		select {
-		case <-time.After(time.Duration(credAttempt) * 1500 * time.Millisecond):
-		case <-ctx.Done():
-			if signalReady != nil {
-				close(signalReady)
-			}
-			return
-		}
-	}
+
+	user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
 	if err != nil {
-		log.Printf("[ГРУППА #%d] Ошибка кредов (все попытки исчерпаны): %v", groupID, err)
-		if signalReady != nil {
-			close(signalReady)
+		if callErr, isDead := asCallUnavailableError(err); isDead {
+			log.Printf("[ГРУППА #%d] ❌ Хеш недействителен или звонок завершён (%v). Группа остановлена, передача эстафеты дальше...", groupID, callErr)
+			releaseSignalReady()
+			return
 		}
-		return
+
+		log.Printf("[ГРУППА #%d] Начальный запрос кредов не удался (%v). Передаём эстафету дальше и переходим в фоновый retry...", groupID, err)
+		releaseSignalReady()
+
+		retryDelay := 10 * time.Second
+		for err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay):
+			}
+			if retryDelay < 30*time.Second {
+				retryDelay += 5 * time.Second
+			}
+			user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
+			if err == nil {
+				log.Printf("[ГРУППА #%d] Фоновые креды получены! Запуск %d воркеров...", groupID, len(workerIDs))
+				break
+			}
+			if callErr, isDead := asCallUnavailableError(err); isDead {
+				log.Printf("[ГРУППА #%d] ❌ Хеш недействителен или звонок завершён (%v). Группа остановлена.", groupID, callErr)
+				return
+			}
+			log.Printf("[ГРУППА #%d] Фоновый запрос кредов не удался: %v (след. попытка через %v)", groupID, err, retryDelay)
+		}
+	} else {
+		// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
+		if signalReady != nil {
+			go func() {
+				select {
+				case <-time.After(2000 * time.Millisecond):
+					releaseSignalReady()
+					log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
+				case <-ctx.Done():
+				}
+			}()
+		}
 	}
+
 	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
 
 	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
@@ -81,24 +110,43 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	var wg sync.WaitGroup
 	var credsMu sync.RWMutex
 	var refreshMu sync.Mutex
+	var refreshInFlight bool
+	var refreshCond = sync.NewCond(&refreshMu)
 	var lastCredRefresh atomic.Int64
 
 	refreshCreds := func(reason string) bool {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 
+		for refreshInFlight {
+			refreshCond.Wait()
+		}
+
 		now := time.Now().Unix()
 		last := lastCredRefresh.Load()
 		if last > 0 && now-last < 15 {
-			log.Printf("[TURN] Креды уже обновлялись %d сек назад, ждём следующий retry (%s)", now-last, reason)
+			log.Printf("[TURN] Креды уже обновлялись/запрашивались %d сек назад, ждём следующий retry (%s)", now-last, reason)
 			return true
 		}
 
-		getStreamCache(credStreamID).invalidate(credStreamID)
+		lastCredRefresh.Store(now)
+		refreshInFlight = true
+
+		refreshMu.Unlock()
+
+		var u, p string
+		var urls []string
+		var refreshErr error
+
 		if getVkAuthMode() == "account" {
 			invalidateInjectedTurnCreds(hash)
 		}
-		u, p, urls, refreshErr := GetCreds(ctx, hash, credStreamID)
+		u, p, urls, refreshErr = GetCreds(ctx, hash, credStreamID)
+
+		refreshMu.Lock()
+		refreshInFlight = false
+		refreshCond.Broadcast()
+
 		if refreshErr != nil {
 			log.Printf("[TURN] Не удалось обновить креды после %s: %v", reason, refreshErr)
 			return false
@@ -107,19 +155,10 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		credsMu.Lock()
 		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID}
 		credsMu.Unlock()
-		lastCredRefresh.Store(time.Now().Unix())
 		log.Printf("[TURN] Креды обновлены после %s, TURN urls=%d", reason, len(urls))
 		return true
 	}
 
-	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
-	if signalReady != nil {
-		go func() {
-			time.Sleep(2000 * time.Millisecond)
-			close(signalReady)
-			log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
-		}()
-	}
 
 	for i, wid := range workerIDs {
 		wg.Add(1)
