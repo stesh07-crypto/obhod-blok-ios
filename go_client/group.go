@@ -55,9 +55,10 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	credStreamID := groupID * 100
 	var user, pass string
 	var turnURLs []string
+	var gen uint64
 	var err error
 
-	user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
+	user, pass, turnURLs, gen, err = GetCredsWithGen(ctx, hash, credStreamID)
 	if err != nil {
 		if callErr, isDead := asCallUnavailableError(err); isDead {
 			log.Printf("[ГРУППА #%d] ❌ Хеш недействителен или звонок завершён (%v). Группа остановлена, передача эстафеты дальше...", groupID, callErr)
@@ -78,9 +79,9 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 			if retryDelay < 30*time.Second {
 				retryDelay += 5 * time.Second
 			}
-			user, pass, turnURLs, err = GetCreds(ctx, hash, credStreamID)
+			user, pass, turnURLs, gen, err = GetCredsWithGen(ctx, hash, credStreamID)
 			if err == nil {
-				log.Printf("[ГРУППА #%d] Фоновые креды получены! Запуск %d воркеров...", groupID, len(workerIDs))
+				log.Printf("[ГРУППА #%d] Фоновые креды получены! (gen=%d) Запуск %d воркеров...", groupID, gen, len(workerIDs))
 				break
 			}
 			if callErr, isDead := asCallUnavailableError(err); isDead {
@@ -103,9 +104,9 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		}
 	}
 
-	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
+	creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID, Generation: gen, GroupID: groupID}
 
-	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
+	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %v, %d воркеров", groupID, creds.Generation, creds.TurnURLs, len(workerIDs))
 
 	var wg sync.WaitGroup
 	var credsMu sync.RWMutex
@@ -114,7 +115,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	var refreshCond = sync.NewCond(&refreshMu)
 	var lastCredRefresh atomic.Int64
 
-	refreshCreds := func(reason string) bool {
+	refreshCreds := func(reason string, failedGen uint64) bool {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 
@@ -122,10 +123,19 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 			refreshCond.Wait()
 		}
 
+		credsMu.RLock()
+		currentGen := creds.Generation
+		credsMu.RUnlock()
+
+		if failedGen > 0 && currentGen > failedGen {
+			log.Printf("[ГРУППА #%d] [TURN] Креды уже обновлены (актуальное поколение %d > %d, %s)", groupID, currentGen, failedGen, reason)
+			return true
+		}
+
 		now := time.Now().Unix()
 		last := lastCredRefresh.Load()
 		if last > 0 && now-last < 15 {
-			log.Printf("[TURN] Креды уже обновлялись/запрашивались %d сек назад, ждём следующий retry (%s)", now-last, reason)
+			log.Printf("[ГРУППА #%d] [TURN] Креды уже запрашивались %d сек назад, ждём следующий retry (%s)", groupID, now-last, reason)
 			return true
 		}
 
@@ -136,26 +146,29 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 		var u, p string
 		var urls []string
+		var newGen uint64
 		var refreshErr error
 
 		if getVkAuthMode() == "account" {
 			invalidateInjectedTurnCreds(hash)
 		}
-		u, p, urls, refreshErr = GetCreds(ctx, hash, credStreamID)
+		InvalidateLinkCacheIfGen(hash, failedGen)
+
+		u, p, urls, newGen, refreshErr = GetCredsWithGen(ctx, hash, credStreamID)
 
 		refreshMu.Lock()
 		refreshInFlight = false
 		refreshCond.Broadcast()
 
 		if refreshErr != nil {
-			log.Printf("[TURN] Не удалось обновить креды после %s: %v", reason, refreshErr)
+			log.Printf("[ГРУППА #%d] [TURN] Не удалось обновить креды после %s: %v", groupID, reason, refreshErr)
 			return false
 		}
 
 		credsMu.Lock()
-		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID}
+		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID, Generation: newGen, GroupID: groupID}
 		credsMu.Unlock()
-		log.Printf("[TURN] Креды обновлены после %s, TURN urls=%d", reason, len(urls))
+		log.Printf("[ГРУППА #%d] [TURN] Креды успешно обновлены после %s (gen=%d, urls=%d)", groupID, reason, newGen, len(urls))
 		return true
 	}
 
@@ -232,12 +245,10 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						strings.Contains(errStrLower, "network changed") ||
 						strings.Contains(errStrLower, "operation not permitted")
 
-					turnCredRefreshNeeded := !isTurnQuota && !transientSocketRetry && (turnAllocAttrMissing ||
-						strings.Contains(errStrLower, "turn allocate auth") ||
+					turnAuthRejected := !isTurnQuota && !transientSocketRetry && (
+						strings.Contains(errStrLower, "turn_auth_rejected") ||
 						strings.Contains(errStrLower, "invalid credential") ||
-						strings.Contains(errStrLower, "stale nonce") ||
-						strings.Contains(errStrLower, "allocation mismatch") ||
-						strings.Contains(errStrLower, "error 508"))
+						strings.Contains(errStrLower, "stale nonce"))
 
 					if hint := workerErrorHint(sessErr); hint != "" {
 						errStr += " | " + hint
@@ -250,7 +261,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 
 					if strings.Contains(errStr, "хеш мёртв") ||
 						strings.Contains(errStr, "FATAL_AUTH") {
-						log.Printf("[ВОРКЕР #%d] Фатальная ошибка: %s", wid, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d] Фатальная ошибка: %s", groupID, wid, errStr)
 						return
 					}
 
@@ -268,22 +279,26 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						transientFailures = 0
 					}
 
+					turnRelay := ""
+					if len(credsSnapshot.TurnURLs) > 0 {
+						turnRelay = credsSnapshot.TurnURLs[wid%len(credsSnapshot.TurnURLs)]
+					}
+
 					switch {
 					case transientSocketRetry:
 						// On iOS Wi-Fi/cellular handoff may invalidate only the local
 						// socket. TURN credentials remain valid, so keep them and retry
 						// without hitting VK authentication again.
-						log.Printf("[ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повторяем с теми же TURN-кредами (попытка %d, серия=%d): %s", wid, attempt, transientFailures, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [СЕТЬ] Локальный socket потерян, повтор с теми же кредами (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					case isTurnQuota:
-						log.Printf("[ВОРКЕР #%d] [TURN] Квота relay исчерпана (один аккаунт VK = мало слотов), ждём: %s", wid, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Квота relay исчерпана, ждём (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					case turnAllocAttrMissing:
-						log.Printf("[ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
-						refreshCreds("TURN Allocate attribute-not-found")
-					case turnCredRefreshNeeded:
-						log.Printf("[ВОРКЕР #%d] [TURN] Ошибка allocation/кредов, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
-						refreshCreds("TURN allocation error")
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ (relay=%s), повтор (попытка %d): %s", groupID, wid, turnRelay, attempt, errStr)
+					case turnAuthRejected:
+						log.Printf("[ГР #%d | ВОРКЕР #%d] [TURN] Отказ авторизации TURN (relay=%s, gen=%d), обновление реквизитов (попытка %d): %s", groupID, wid, turnRelay, credsSnapshot.Generation, attempt, errStr)
+						refreshCreds("TURN auth rejection", credsSnapshot.Generation)
 					default:
-						log.Printf("[ВОРКЕР #%d] Ошибка (попытка %d): %s", wid, attempt, errStr)
+						log.Printf("[ГР #%d | ВОРКЕР #%d] Ошибка (попытка %d, relay=%s): %s", groupID, wid, attempt, turnRelay, errStr)
 					}
 
 					// Authentication/flood-control failures may require user/hash
@@ -383,4 +398,6 @@ type Credentials struct {
 	Pass          string
 	TurnURLs      []string
 	CacheStreamID int
+	Generation    uint64
+	GroupID       int
 }

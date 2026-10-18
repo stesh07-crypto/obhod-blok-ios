@@ -105,6 +105,7 @@ type TurnCredentials struct {
 	ServerAddrs []string
 	ExpiresAt   time.Time
 	Link        string
+	Generation  uint64
 }
 
 type StreamCredentialsCache struct {
@@ -112,6 +113,7 @@ type StreamCredentialsCache struct {
 	mutex         sync.RWMutex
 	errorCount    atomic.Int32
 	lastErrorTime atomic.Int64
+	generation    atomic.Uint64
 }
 
 const (
@@ -202,6 +204,26 @@ func (c *StreamCredentialsCache) invalidate(streamID int) {
 	log.Printf("[STREAM %d] [VK Auth] Credentials cache invalidated", streamID)
 }
 
+func InvalidateLinkCacheIfGen(link string, failedGen uint64) bool {
+	normLink := normalizeVKJoinHash(link)
+	if normLink == "" {
+		normLink = link
+	}
+	cache := getLinkCache(normLink)
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+
+	if failedGen == 0 || cache.creds.Generation == failedGen {
+		cache.creds = TurnCredentials{}
+		cache.errorCount.Store(0)
+		cache.lastErrorTime.Store(0)
+		log.Printf("[VK Auth] Кеш реквизитов (gen=%d) для %s инвалидирован (подтверждённый отказ)", failedGen, shortHashLog(normLink))
+		return true
+	}
+	log.Printf("[VK Auth] Кеш для %s уже новее (gen=%d > failed=%d), сброс пропущен", shortHashLog(normLink), cache.creds.Generation, failedGen)
+	return false
+}
+
 func cloneStringSlice(in []string) []string {
 	out := make([]string, len(in))
 	copy(out, in)
@@ -261,7 +283,7 @@ func vkDelayRandom(minMs, maxMs int) {
 
 // ─── Cached credential fetcher ───
 
-func getVkCredsCached(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+func getVkCredsCached(ctx context.Context, link string, streamID int) (string, string, []string, uint64, error) {
 	normLink := normalizeVKJoinHash(link)
 	if normLink == "" {
 		normLink = link
@@ -275,9 +297,10 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 		u, p := cache.creds.Username, cache.creds.Password
 		addr := cache.creds.ServerAddrs[streamID%len(cache.creds.ServerAddrs)]
 		addrs := cloneStringSlice(cache.creds.ServerAddrs)
+		gen := cache.creds.Generation
 		cache.mutex.RUnlock()
-		log.Printf("[STREAM %d] [VK Auth] Using cached credentials for %s... (expires in %v, selected=%s, urls=%d)", streamID, shortHashLog(normLink), expires.Truncate(time.Second), addr, len(addrs))
-		return u, p, addrs, nil
+		log.Printf("[STREAM %d] [VK Auth] Using cached credentials for %s... (expires in %v, gen=%d, selected=%s, urls=%d)", streamID, shortHashLog(normLink), expires.Truncate(time.Second), gen, addr, len(addrs))
+		return u, p, addrs, gen, nil
 	}
 	cache.mutex.RUnlock()
 
@@ -286,22 +309,24 @@ func getVkCredsCached(ctx context.Context, link string, streamID int) (string, s
 
 	// Double-check inside lock
 	if cache.creds.Link == normLink && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
-		return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), nil
+		return cache.creds.Username, cache.creds.Password, cloneStringSlice(cache.creds.ServerAddrs), cache.creds.Generation, nil
 	}
 
 	user, pass, addrs, err := fetchVkCredsSerialized(ctx, normLink, streamID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, 0, err
 	}
 
+	newGen := cache.generation.Add(1)
 	cache.creds = TurnCredentials{
 		Username:    user,
 		Password:    pass,
 		ServerAddrs: addrs,
 		ExpiresAt:   time.Now().Add(credentialLifetime - cacheSafetyMargin),
 		Link:        normLink,
+		Generation:  newGen,
 	}
-	return user, pass, cloneStringSlice(addrs), nil
+	return user, pass, cloneStringSlice(addrs), newGen, nil
 }
 
 // ─── Serialized (throttled) fetcher ───
@@ -854,8 +879,13 @@ func turnURLsToAddresses(urls []string) []string {
 
 // ─── GetCreds returns TURN credentials for a given stream ───
 
-func GetCreds(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+func GetCredsWithGen(ctx context.Context, link string, streamID int) (string, string, []string, uint64, error) {
 	return getVkCredsCached(ctx, link, streamID)
+}
+
+func GetCreds(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+	u, p, urls, _, err := GetCredsWithGen(ctx, link, streamID)
+	return u, p, urls, err
 }
 
 // ─── DNS dialer setup ───

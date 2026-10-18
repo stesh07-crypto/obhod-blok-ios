@@ -9,8 +9,10 @@ func workerErrorHint(err error) string {
 	}
 	text := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(text, "dtls_timeout"):
+		return "таймаут рукопожатия DTLS — сервер или relay не ответили вовремя"
 	case strings.Contains(text, "wrap_auth_timeout"):
-		return "сервер не ответил на WRAP/DTLS — проверьте пароль, IP/порт и что wdtt-server запущен"
+		return "таймаут рукопожатия WRAP/DTLS — сервер не ответил вовремя"
 	case strings.Contains(text, "canceled") || strings.Contains(text, "cancelled"):
 		return "соединение прервано до завершения операции"
 	case strings.Contains(text, "context deadline exceeded"):
