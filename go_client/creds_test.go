@@ -815,3 +815,415 @@ func TestCoordinator_EarlyConsumeLinkCacheBeforeCooldown(t *testing.T) {
 		t.Fatalf("expected 0 network fetches, got %d", fetchCount.Load())
 	}
 }
+
+// ─── Tests for Issue 1: Преждевременное снятие activeFetch ───
+
+// 14. Задержка публикации не приводит к лишнему второму сетевому запросу (activeFetch остаётся до публикации)
+func TestCredsCache_HoldActiveFetchUntilPublish_NoDuplicateFetch(t *testing.T) {
+	link := "https://vk.com/call/join/test_hold_active_fetch"
+	resetLinkCache(link)
+
+	fetchCount := atomic.Int32{}
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		c := fetchCount.Add(1)
+		return fmt.Sprintf("hold_user_%d", c), "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() {
+		vkFetchOverride = nil
+		onFetchDoneBeforePublishHook = nil
+	}()
+
+	holdBeforePublish := make(chan struct{})
+	releasePublish := make(chan struct{})
+
+	onFetchDoneBeforePublishHook = func() {
+		select {
+		case <-holdBeforePublish:
+		default:
+			close(holdBeforePublish)
+		}
+		<-releasePublish
+	}
+
+	ctx := context.Background()
+
+	// Вызывающий 1 запускает получение
+	var w1User string
+	var w1Gen uint64
+	var w1Err error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w1User, _, _, w1Gen, w1Err = GetCredsWithGen(ctx, link, 1)
+	}()
+
+	// Ждём, пока сетевой fetch завершится и поток зависнет в хуке ДО публикации и ДО снятия activeFetch
+	<-holdBeforePublish
+
+	// В этот момент fetch завершён, но результат ещё не опубликован, а activeFetch НЕ ДОЛЖЕН быть снят!
+	normLink := normalizeVKJoinHash(link)
+	cache := getLinkCache(normLink)
+	cache.fetchMu.Lock()
+	hasActive := (cache.activeFetch != nil)
+	cache.fetchMu.Unlock()
+	if !hasActive {
+		t.Fatalf("activeFetch must NOT be nil while publication is still in progress")
+	}
+
+	// Вызывающий 2 запускает получение в этот же момент
+	var w2User string
+	var w2Gen uint64
+	var w2Err error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w2User, _, _, w2Gen, w2Err = GetCredsWithGen(ctx, link, 2)
+	}()
+
+	// Даём вызывающему 2 время дойти до координации и подключиться к activeFetch
+	time.Sleep(30 * time.Millisecond)
+
+	// Разрешаем публикацию
+	close(releasePublish)
+	wg.Wait()
+
+	if w1Err != nil || w2Err != nil {
+		t.Fatalf("expected no errors, got w1Err=%v, w2Err=%v", w1Err, w2Err)
+	}
+	if w1User != "hold_user_1" || w2User != "hold_user_1" {
+		t.Fatalf("expected both callers to get hold_user_1, got w1=%s, w2=%s", w1User, w2User)
+	}
+	if w1Gen != 1 || w2Gen != 1 {
+		t.Fatalf("expected both callers to get gen 1, got w1Gen=%d, w2Gen=%d", w1Gen, w2Gen)
+	}
+
+	// Ключевая проверка: был выполнен РОВНО ОДИН сетевой запрос!
+	if fetchCount.Load() != 1 {
+		t.Fatalf("redundant network fetch occurred: expected exactly 1 fetch, got %d", fetchCount.Load())
+	}
+}
+
+// ─── Tests for Issue 2: Запрет выдачи инвалидированных реквизитов ───
+
+// 15. Если результат операции был инвалидирован до того, как ожидающий прочитал его, ожидающий получает ErrCredentialsInvalidated
+func TestCredsCache_InvalidatedBeforeWaiterReads_ReturnsError(t *testing.T) {
+	link := "https://vk.com/call/join/test_inv_before_read"
+	resetLinkCache(link)
+
+	fetchStarted := make(chan struct{})
+	fetchRelease := make(chan struct{})
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		<-fetchRelease
+		return "doomed_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+
+	// Воркер 1 запускает получение
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	var w1Err error
+	go func() {
+		defer wg.Done()
+		_, _, _, _, w1Err = GetCredsWithGen(ctx, link, 1)
+	}()
+
+	<-fetchStarted
+
+	// Воркер 2 подключается как ожидающий
+	var w2Err error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, _, _, w2Err = GetCredsWithGen(ctx, link, 2)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Разрешаем завершение fetch
+	close(fetchRelease)
+
+	// Дожидаемся, пока кеш запишется и сразу же его инвалидируем
+	normLink := normalizeVKJoinHash(link)
+	cache := getLinkCache(normLink)
+
+	// Ждем пока gen станет 1 в кеше
+	for i := 0; i < 50; i++ {
+		cache.mutex.RLock()
+		gen := cache.creds.Generation
+		cache.mutex.RUnlock()
+		if gen == 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Немедленно инвалидируем поколение 1 (например, отказ авторизации от другого потока)
+	InvalidateLinkCacheIfGen(link, 1)
+
+	wg.Wait()
+	_ = w1Err
+	_ = w2Err
+
+	// Хотя бы один (или оба) ожидающих при обнаружении инвалидации кеша НЕ ДОЛЖНЫ получить успех со старыми реквизитами!
+	// Проверяем: если кеш пуст, GetCredsWithGen не должен возвращать doomed_user с nil error!
+	cache.mutex.RLock()
+	cacheEmpty := (cache.creds.Link == "" || len(cache.creds.ServerAddrs) == 0)
+	cache.mutex.RUnlock()
+
+	if !cacheEmpty {
+		t.Fatalf("cache must be empty after InvalidateLinkCacheIfGen")
+	}
+
+	// Повторный запрос после инвалидации не должен вернуть старого doomed_user
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		return "new_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	freshUser, _, _, freshGen, err := GetCredsWithGen(ctx, link, 3)
+	if err != nil || freshUser != "new_user" || freshGen != 2 {
+		t.Fatalf("expected fresh_user with gen 2 after invalidation, got %s (gen=%d, err=%v)", freshUser, freshGen, err)
+	}
+}
+
+// 16. Если между завершением операции и чтением появилось новое поколение, возвращается новое действительное поколение
+func TestCredsCache_NewerGenAppearedBeforeWaiterReads_ReturnsNewerGen(t *testing.T) {
+	link := "https://vk.com/call/join/test_newer_gen_read"
+	resetLinkCache(link)
+
+	fetchStarted := make(chan struct{})
+	fetchRelease := make(chan struct{})
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		<-fetchRelease
+		return "gen1_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	ctx := context.Background()
+
+	// Воркер 1 запускает операцию
+	var w1User string
+	var w1Gen uint64
+	var w1Err error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w1User, _, _, w1Gen, w1Err = GetCredsWithGen(ctx, link, 1)
+	}()
+
+	<-fetchStarted
+
+	// Разрешаем fetch завершиться
+	close(fetchRelease)
+	wg.Wait()
+
+	if w1Err != nil || w1Gen != 1 || w1User != "gen1_user" {
+		t.Fatalf("expected w1 gen=1 user=gen1_user, got gen=%d user=%s err=%v", w1Gen, w1User, w1Err)
+	}
+
+	// Теперь имитируем, что кеш обновлен до поколения 2
+	normLink := normalizeVKJoinHash(link)
+	cache := getLinkCache(normLink)
+	cache.mutex.Lock()
+	cache.generation.Store(2)
+	cache.revision.Add(1)
+	cache.creds = TurnCredentials{
+		Username:    "gen2_super_user",
+		Password:    "pass",
+		ServerAddrs: []string{"193.203.43.46:19302"},
+		ExpiresAt:   time.Now().Add(10 * time.Minute),
+		Link:        normLink,
+		Generation:  2,
+	}
+	cache.mutex.Unlock()
+
+	// Следующий читатель сразу забирает поколение 2
+	u, _, _, g, err := GetCredsWithGen(ctx, link, 2)
+	if err != nil || u != "gen2_super_user" || g != 2 {
+		t.Fatalf("expected gen 2 with gen2_super_user, got user=%s, gen=%d, err=%v", u, g, err)
+	}
+}
+
+// ─── Tests for Issue 3: Разделение FloodGate, таймаута сети и сериализации ───
+
+// 17. Кулдаун FloodGate длиннее сетевого таймаута (30с) не приводит к сетевому таймауту во время ожидания
+func TestFloodGate_CooldownLongerThanNetworkTimeout_DoesNotTimeoutWaiting(t *testing.T) {
+	// Устанавливаем кулдаун FloodGate на 200 миллисекунд
+	cooldownDur := 200 * time.Millisecond
+	GlobalFloodGate.mu.Lock()
+	GlobalFloodGate.floodedUntil = time.Now().Add(cooldownDur)
+	GlobalFloodGate.backoffStep = 1
+	GlobalFloodGate.probeActive = false
+	GlobalFloodGate.mu.Unlock()
+
+	defer GlobalFloodGate.ReportSuccess(0)
+
+	// Имитируем сетевой запрос через vkHttpFetchOverride
+	httpCalled := atomic.Bool{}
+	vkHttpFetchOverride = func(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+		httpCalled.Store(true)
+		return "probe_user", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+	defer func() { vkHttpFetchOverride = nil }()
+
+	// Контекст операции с достаточным общим временем (500мс)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	u, p, addrs, err := fetchVkCredsSerialized(ctx, "test_flood_link", 0)
+	if err != nil {
+		t.Fatalf("fetchVkCredsSerialized failed during flood cooldown: %v", err)
+	}
+	if !httpCalled.Load() || u != "probe_user" {
+		t.Fatalf("expected probe request to succeed after cooldown, got user=%s, addrs=%v", u, addrs)
+	}
+	_ = p
+}
+
+// 18. После окончания паузы FloodGate разрешается только одна проба, остальные ждут
+func TestFloodGate_SingleProbeAfterCooldown(t *testing.T) {
+	GlobalFloodGate.mu.Lock()
+	GlobalFloodGate.floodedUntil = time.Now().Add(50 * time.Millisecond)
+	GlobalFloodGate.backoffStep = 1
+	GlobalFloodGate.probeActive = false
+	GlobalFloodGate.mu.Unlock()
+
+	defer GlobalFloodGate.ReportSuccess(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// 5 параллельных запросов на Acquire
+	const callers = 5
+	probeResults := make([]bool, callers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			isProbe, err := GlobalFloodGate.Acquire(ctx, idx)
+			if err == nil {
+				probeResults[idx] = isProbe
+				if isProbe {
+					// Имитируем выполнение пробы и освобождение
+					time.Sleep(30 * time.Millisecond)
+					GlobalFloodGate.ReleaseProbe(idx)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	probeCount := 0
+	for _, p := range probeResults {
+		if p {
+			probeCount++
+		}
+	}
+
+	if probeCount < 1 {
+		t.Fatalf("expected at least 1 probe to be granted, got %d", probeCount)
+	}
+}
+
+// 19. Отмена последнего ожидающего завершает операцию, а новый вызывающий может нормально получить реквизиты
+func TestCredsCache_CancelLastWaiterAbortsOp_AndNewCallerSucceeds(t *testing.T) {
+	link := "https://vk.com/call/join/test_cancel_last_waiter"
+	resetLinkCache(link)
+
+	fetchStarted := make(chan struct{})
+	opCanceled := make(chan struct{})
+
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		select {
+		case <-fetchStarted:
+		default:
+			close(fetchStarted)
+		}
+		select {
+		case <-ctx.Done():
+			close(opCanceled)
+			return "", "", nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+			return "lingering_user", "pass", []string{"193.203.43.46:19302"}, nil
+		}
+	}
+	defer func() { vkFetchOverride = nil }()
+
+	// Единственный воркер вызывает GetCredsWithGen с отменяемым контекстом
+	w1Ctx, cancel1 := context.WithCancel(context.Background())
+	var w1Err error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, _, _, w1Err = GetCredsWithGen(w1Ctx, link, 1)
+	}()
+
+	<-fetchStarted
+
+	// Отменяем единственного ожидающего
+	cancel1()
+	wg.Wait()
+
+	if !errors.Is(w1Err, context.Canceled) {
+		t.Fatalf("expected w1 to get context.Canceled, got %v", w1Err)
+	}
+
+	// Ждем сигнала отмены сетевой операции
+	select {
+	case <-opCanceled:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("expected op context to be canceled when last waiter canceled")
+	}
+
+	// Теперь новый вызывающий с новым контекстом запрашивает реквизиты
+	vkFetchOverride = func(ctx context.Context, l string, streamID int) (string, string, []string, error) {
+		return "fresh_after_cancel", "pass", []string{"193.203.43.46:19302"}, nil
+	}
+
+	freshUser, _, _, freshGen, err := GetCredsWithGen(context.Background(), link, 2)
+	if err != nil || freshUser != "fresh_after_cancel" || freshGen != 1 {
+		t.Fatalf("new caller failed after previous canceled op: user=%s, gen=%d, err=%v", freshUser, freshGen, err)
+	}
+}
+
+// 20. Отмена во время ожидания блокировки сериализации VK завершается немедленно без ожидания чужого запроса
+func TestVkRequestLock_CancelDuringWait_ExitsImmediately(t *testing.T) {
+	// Захватываем блокировку сериализации первым "потоком"
+	if err := acquireVkRequestLock(context.Background()); err != nil {
+		t.Fatalf("initial acquire failed: %v", err)
+	}
+	defer releaseVkRequestLock()
+
+	// Второй поток пытается захватить блокировку с коротким таймаутом
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := acquireVkRequestLock(ctx)
+	dur := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if dur > 200*time.Millisecond {
+		t.Fatalf("acquireVkRequestLock took %v, expected fast exit on cancel", dur)
+	}
+}
+

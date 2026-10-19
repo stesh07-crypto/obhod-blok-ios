@@ -34,13 +34,15 @@ const (
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
 const (
+	SourceCommit               = "fa2709a"
 	HandshakeTimeoutDefault    = 50 * time.Second
 	HandshakeTimeoutExperiment = 20 * time.Second
+	HandshakeConcurrency       = 3
 )
 
 var (
 	CurrentHandshakeTimeout = HandshakeTimeoutDefault
-	handshakeSem            = make(chan struct{}, 3)
+	handshakeSem            = make(chan struct{}, HandshakeConcurrency)
 	HandshakesInFlight      atomic.Int32
 	HandshakesWaiting       atomic.Int32
 	HandshakeSuccess        atomic.Int64
@@ -54,7 +56,8 @@ func init() {
 	if CurrentHandshakeTimeout == HandshakeTimeoutExperiment {
 		modeStr = "экспериментальный"
 	}
-	log.Printf("[DTLS] Режим таймаута рукопожатия: %v (%s), семафор: 3 слота", CurrentHandshakeTimeout, modeStr)
+	log.Printf("[DTLS] Режим: DTLS handshake timeout: %v (%s) Handshake concurrency: %d Source commit: %s",
+		CurrentHandshakeTimeout, modeStr, HandshakeConcurrency, SourceCommit)
 }
 
 // NullLoggerFactory подавляет логи pion
@@ -378,6 +381,16 @@ func RunSession(
 	semWait := time.Since(semStart)
 	HandshakesInFlight.Add(1)
 
+	semReleased := false
+	releaseSem := func() {
+		if !semReleased {
+			semReleased = true
+			<-handshakeSem
+			HandshakesInFlight.Add(-1)
+		}
+	}
+	defer releaseSem()
+
 	dtlsCfg := &dtls.Config{
 		Certificates:          []tls.Certificate{cert},
 		InsecureSkipVerify:    true,
@@ -390,22 +403,24 @@ func RunSession(
 
 	dtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)
 	if err != nil {
-		<-handshakeSem
-		HandshakesInFlight.Add(-1)
+		releaseSem()
 		HandshakeErrors.Add(1)
 		return false, 0, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
 	}
 	defer dtlsConn.Close()
 
-	hctx, hcancel := context.WithTimeout(sessCtx, CurrentHandshakeTimeout)
+	hsTimeout := CurrentHandshakeTimeout
+	if tp != nil && tp.HandshakeTimeout > 0 {
+		hsTimeout = tp.HandshakeTimeout
+	}
+	hctx, hcancel := context.WithTimeout(sessCtx, hsTimeout)
 	hsStart := time.Now()
 	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Рукопожатие начато... (relay=%s, gen=%d, очередь=%v, hs_активно=%d, в_очереди=%d)",
 		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load())
 	err = dtlsConn.HandshakeContext(hctx)
 	hsDur := time.Since(hsStart)
 	hcancel()
-	<-handshakeSem // RELEASE SEMAPHORE IMMEDIATELY AFTER HANDSHAKE
-	HandshakesInFlight.Add(-1)
+	releaseSem() // Освобождаем слот семафора сразу после завершения вызова handshake
 
 	if err != nil {
 		errStr := strings.ToLower(err.Error())

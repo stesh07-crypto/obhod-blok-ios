@@ -111,8 +111,14 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	for _, u := range creds.TurnURLs {
 		uniqueRelays[u] = struct{}{}
 	}
+	hsTimeout := CurrentHandshakeTimeout
+	if tp != nil && tp.HandshakeTimeout > 0 {
+		hsTimeout = tp.HandshakeTimeout
+	}
 	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %d URL (%d уникальных: %v), %d воркеров",
 		groupID, creds.Generation, len(creds.TurnURLs), len(uniqueRelays), creds.TurnURLs, len(workerIDs))
+	log.Printf("[ГРУППА #%d] DTLS handshake timeout: %v Handshake concurrency: %d Source commit: %s",
+		groupID, hsTimeout, HandshakeConcurrency, SourceCommit)
 
 	var wg sync.WaitGroup
 
@@ -327,11 +333,12 @@ func normalizeVKJoinHash(input string) string {
 
 // TurnParams — конфигурация TURN
 type TurnParams struct {
-	Host     string
-	Port     string
-	Hashes   []string
-	WrapKey  []byte // Password-derived WRAP key (32 bytes), nil = disabled
-	ObfsMode string // "audio" or "video" — RTP masking mode
+	Host             string
+	Port             string
+	Hashes           []string
+	WrapKey          []byte        // Password-derived WRAP key (32 bytes), nil = disabled
+	ObfsMode         string        // "audio" or "video" — RTP masking mode
+	HandshakeTimeout time.Duration // Таймаут DTLS handshake для сессии (0 = использовать CurrentHandshakeTimeout)
 }
 
 // Credentials — учетные данные TURN
@@ -483,7 +490,9 @@ func (c *GroupCredCoordinator) RefreshCreds(workerCtx context.Context, groupCtx 
 	// Гарантированное завершение операции и закрытие канала ровно один раз
 	defer func() {
 		c.mu.Lock()
-		c.activeOp = nil
+		if c.activeOp == op {
+			c.activeOp = nil
+		}
 		close(op.done)
 		c.mu.Unlock()
 	}()
