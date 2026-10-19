@@ -202,10 +202,28 @@ enum GoClient {
 
     private static func looksLikeError(_ line: String) -> Bool {
         let lower = line.lowercased()
+
+        // Информационные строки настроек параметров handshake / конфигурации ядра — НЕ ошибки
+        if lower.contains("handshake timeout") ||
+            lower.contains("dtls handshake timeout") ||
+            lower.contains("режим:") ||
+            lower.contains("[клиент] ядро:") {
+            return false
+        }
+
+        // Реальные ошибки таймаута: DTLS_TIMEOUT, bootstrap timeout, wireguard ready timeout и т.д.
+        if line.contains("DTLS_TIMEOUT") ||
+            lower.contains("таймаут рукопожатия") ||
+            lower.contains("таймаут:") ||
+            lower.contains("timed out") ||
+            lower.contains("operation timed out") ||
+            lower.contains("deadline exceeded") {
+            return true
+        }
+
         return lower.contains("ошибка") ||
             lower.contains("fatal") ||
             lower.contains("failed") ||
-            lower.contains("timeout") ||
             lower.contains("refused") ||
             lower.contains("denied") ||
             lower.contains("не удалось")
@@ -233,6 +251,7 @@ enum GoClient {
         // Android-style quiet mode: one useful lifecycle event instead of one
         // line per session/relay/VKCalls step/dispatcher registration.
         if line.contains("[DTLS] Соединение установлено") { return true }
+        if line.contains("[DTLS]") || line.contains("DTLS handshake timeout") || line.hasPrefix("[ГРУППА") { return true }
         if line.contains("[READY] Туннель готов") { return true }
         if line.contains("Креды OK") || line.contains("Первые креды") { return true }
         if line.contains("Запрос кредов") { return true }

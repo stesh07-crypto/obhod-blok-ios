@@ -324,6 +324,7 @@ func WDTT_Start(
 			iosLog("Туннель остановлен", false)
 		}()
 
+		iosLog(fmt.Sprintf("[КЛИЕНТ] Ядро: Build #%s (commit %s) | DTLS handshake timeout: %v, Concurrency: %d", BuildNumber, SourceCommit, CurrentHandshakeTimeout, HandshakeConcurrency), false)
 		iosLog(fmt.Sprintf("[КЛИЕНТ] Хешей=%d Потоков=%d", len(hashList), params.WorkersPerHash), false)
 		iosLog(fmt.Sprintf("[СЕТЬ] Маскировка: %s", obfsModeDisplay(obfsStr)), false)
 		iosLog(fmt.Sprintf("[КЛИЕНТ] Режим VK: %s", anonPath), false)
@@ -704,7 +705,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
-	logFn("[ГО-ВОРКЕР] Инициализация сессии...", false)
+	logFn(fmt.Sprintf("[ГО-ВОРКЕР] Инициализация сессии (ядро: Build #%s, commit %s)...", BuildNumber, SourceCommit), false)
 	if len(params.VkHashes) == 0 {
 		return fmt.Errorf("нет VK-хешей")
 	}

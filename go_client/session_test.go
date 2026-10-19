@@ -162,8 +162,8 @@ func TestDTLSTimeout_NoCacheInvalidation(t *testing.T) {
 
 // 4. Применение выбранного таймаута (50s control vs 20s experiment)
 func TestDTLSTimeout_SessionModeSelection(t *testing.T) {
-	tpControl := &TurnParams{HandshakeTimeout: HandshakeTimeoutDefault}
-	tpExperiment := &TurnParams{HandshakeTimeout: HandshakeTimeoutExperiment}
+	tpControl := &TurnParams{HandshakeTimeout: HandshakeTimeoutControl}
+	tpExperiment := &TurnParams{HandshakeTimeout: 20 * time.Second}
 	tpDefault := &TurnParams{}
 
 	getTimeout := func(tp *TurnParams) time.Duration {
@@ -179,8 +179,8 @@ func TestDTLSTimeout_SessionModeSelection(t *testing.T) {
 	if to := getTimeout(tpExperiment); to != 20*time.Second {
 		t.Fatalf("expected 20s for tpExperiment, got %v", to)
 	}
-	if to := getTimeout(tpDefault); to != 50*time.Second {
-		t.Fatalf("expected default 50s, got %v", to)
+	if to := getTimeout(tpDefault); to != 20*time.Second {
+		t.Fatalf("expected default 20s, got %v", to)
 	}
 }
 

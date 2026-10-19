@@ -117,8 +117,8 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 	}
 	log.Printf("[ГРУППА #%d] Креды OK (gen=%d), TURN: %d URL (%d уникальных: %v), %d воркеров",
 		groupID, creds.Generation, len(creds.TurnURLs), len(uniqueRelays), creds.TurnURLs, len(workerIDs))
-	log.Printf("[ГРУППА #%d] DTLS handshake timeout: %v Handshake concurrency: %d Source commit: %s",
-		groupID, hsTimeout, HandshakeConcurrency, SourceCommit)
+	log.Printf("[ГРУППА #%d] DTLS handshake timeout: %v Handshake concurrency: %d Build: #%s Source commit: %s",
+		groupID, hsTimeout, HandshakeConcurrency, BuildNumber, SourceCommit)
 
 	var wg sync.WaitGroup
 

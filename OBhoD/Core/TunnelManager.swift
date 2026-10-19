@@ -600,6 +600,7 @@ final class TunnelManager: ObservableObject {
         if message.hasPrefix("[КАПЧА]") { return "captcha_" + normalizedLogKey(message) }
         if message.contains("WireGuard") || message.hasPrefix("[IOS-TUN]") { return "wireguard_" + normalizedLogKey(message) }
         if message.hasPrefix("[КОНФИГ]") { return "config_" + normalizedLogKey(message) }
+        if message.contains("[DTLS]") || message.contains("DTLS handshake timeout") { return "dtls_config" }
         return normalizedLogKey(message)
     }
 

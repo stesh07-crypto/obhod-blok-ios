@@ -25,8 +25,16 @@ EOF
     sudo chmod +x "$PIECMD"
 fi
 
+GIT_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo "dev")}"
+GIT_COMMIT_SHORT="${GIT_COMMIT:0:7}"
+BUILD_NUM="${GITHUB_RUN_NUMBER:-${BUILD_NUMBER:-0}}"
+
 echo "📦 Building Go iOS xcframework..."
 echo "   Go client: $GO_CLIENT_DIR"
+echo "   Commit:    $GIT_COMMIT_SHORT ($GIT_COMMIT)"
+echo "   Build:     #$BUILD_NUM"
+
+LDFLAGS="-s -w -X main.SourceCommit=${GIT_COMMIT_SHORT} -X main.BuildNumber=${BUILD_NUM}"
 
 # ── 1. arm64 device ────────────────────────────────────────────────────────
 echo "🔨 [1/2] Compiling for arm64-apple-ios (device)..."
@@ -48,6 +56,7 @@ CGO_ENABLED=1 \
   CC="$CC_IOS" \
   go build \
     -tags ios \
+    -ldflags "$LDFLAGS" \
     -buildmode=c-archive \
     -o "$TEMP_DIR/ios-arm64/libwdttclient.a" \
     .
@@ -71,6 +80,7 @@ CGO_ENABLED=1 \
   CC="$CC_SIM" \
   go build \
     -tags "ios simulator" \
+    -ldflags "$LDFLAGS" \
     -buildmode=c-archive \
     -o "$TEMP_DIR/ios-sim-arm64/libwdttclient.a" \
     .

@@ -34,13 +34,14 @@ const (
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
 const (
-	SourceCommit               = "fa2709a"
-	HandshakeTimeoutDefault    = 50 * time.Second
-	HandshakeTimeoutExperiment = 20 * time.Second
-	HandshakeConcurrency       = 3
+	HandshakeConcurrency = 3
 )
 
 var (
+	SourceCommit            = "dev"
+	BuildNumber             = "0"
+	HandshakeTimeoutDefault = 20 * time.Second
+	HandshakeTimeoutControl = 50 * time.Second
 	CurrentHandshakeTimeout = HandshakeTimeoutDefault
 	handshakeSem            = make(chan struct{}, HandshakeConcurrency)
 	HandshakesInFlight      atomic.Int32
@@ -52,12 +53,8 @@ var (
 )
 
 func init() {
-	modeStr := "контрольный"
-	if CurrentHandshakeTimeout == HandshakeTimeoutExperiment {
-		modeStr = "экспериментальный"
-	}
-	log.Printf("[DTLS] Режим: DTLS handshake timeout: %v (%s) Handshake concurrency: %d Source commit: %s",
-		CurrentHandshakeTimeout, modeStr, HandshakeConcurrency, SourceCommit)
+	log.Printf("[DTLS] Режим: DTLS handshake timeout: %v Handshake concurrency: %d Build: #%s Source commit: %s",
+		CurrentHandshakeTimeout, HandshakeConcurrency, BuildNumber, SourceCommit)
 }
 
 // NullLoggerFactory подавляет логи pion
