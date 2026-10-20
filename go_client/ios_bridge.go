@@ -846,8 +846,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 	workerIDCounter := 1
 	var pauseFlag int32
 	var prevWaitReady <-chan struct{}
-	var configSent int32
-	var configRequestInFlight int32
+	cfgCoord := NewConfigCoordinator()
 
 	for g := 0; g < numGroups; g++ {
 		var myWaitReady <-chan struct{}
@@ -886,7 +885,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			defer wg.Done()
 			WorkerGroup(runCtx, groupID, startHashIndex, tp, peer, disp, localPort,
 				configChan, workerIDs, &pauseFlag, params.DeviceID, params.ConnectionPassword,
-				stats, waitR, sigR, &configSent, &configRequestInFlight)
+				stats, waitR, sigR, cfgCoord)
 		}(gID, cc, ids, g, myWaitReady, mySignalReady)
 	}
 

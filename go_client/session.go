@@ -40,9 +40,9 @@ const (
 var (
 	SourceCommit            = "dev"
 	BuildNumber             = "0"
-	HandshakeTimeoutDefault = 20 * time.Second
+	HandshakeTimeoutDefault = 50 * time.Second
 	HandshakeTimeoutControl = 50 * time.Second
-	CurrentHandshakeTimeout = HandshakeTimeoutDefault
+	CurrentHandshakeTimeout = HandshakeTimeoutControl
 	handshakeSem            = make(chan struct{}, HandshakeConcurrency)
 	HandshakesInFlight      atomic.Int32
 	HandshakesWaiting       atomic.Int32
@@ -53,7 +53,7 @@ var (
 )
 
 func init() {
-	log.Printf("[DTLS] Режим: DTLS handshake timeout: %v Handshake concurrency: %d Build: #%s Source commit: %s",
+	log.Printf("[DTLS] Режим КОНТРОЛЬНОЙ сборки: DTLS handshake timeout: %v Handshake concurrency: %d Build: #%s Source commit: %s (контрольная сборка: проверка на устройстве и сопоставление с дампом)",
 		CurrentHandshakeTimeout, HandshakeConcurrency, BuildNumber, SourceCommit)
 }
 
@@ -112,14 +112,19 @@ func RunSession(
 	peer *net.UDPAddr,
 	d *Dispatcher,
 	localPort string,
-	getConfig bool,
-	cfgCoord *ConfigCoordinator,
+	configOp *ConfigOperation,
 	configCh chan<- string,
 	sessionID int,
 	creds *Credentials,
 	deviceID, password string,
 	stats *Stats,
 ) (bool, time.Duration, error) {
+	// Страховочное освобождение операции получения конфига устанавливается сразу при входе,
+	// гарантируя освобождение до любых ранних возвратов из RunSession (ошибки Allocate, DTLS и т.д.)
+	if configOp != nil {
+		defer configOp.ReleaseWithCooldown(3 * time.Second)
+	}
+
 	configDelivered := false
 	var firstWrapUp uint32
 	var firstWrapDown uint32
@@ -294,11 +299,6 @@ func RunSession(
 			proxyWg.Wait()
 			relayWg.Wait()
 			sessionWg.Wait()
-
-			// 4. Если получение конфига запрашивалось, но не было завершено успехом, освобождаем операцию с паузой повторов
-			if getConfig && cfgCoord != nil && !configDelivered {
-				cfgCoord.ReleaseWithCooldown(1 * time.Second)
-			}
 		})
 	}
 	defer cleanup()
@@ -495,7 +495,7 @@ func RunSession(
 	defer stats.ActiveConnections.Add(-1)
 
 	// Запрос конфига
-	if getConfig && configCh != nil {
+	if configOp != nil && configCh != nil {
 		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password)
 		if confErr != nil {
 			errStr := confErr.Error()
@@ -503,31 +503,17 @@ func RunSession(
 				return false, time.Since(establishedStart), confErr
 			}
 			log.Printf("[ВОРКЕР #%d] Ошибка получения конфига: %v", sessionID, confErr)
-			if cfgCoord != nil {
-				cfgCoord.ReleaseWithCooldown(3 * time.Second)
-			}
+			configOp.ReleaseWithCooldown(3 * time.Second)
 		} else if conf != "" {
-			if cfgCoord != nil {
-				if cfgCoord.DeliverConfig(conf, configCh, 2*time.Second) {
-					configDelivered = true
-					log.Printf("[ВОРКЕР #%d] Конфиг успешно получен и передан в канал", sessionID)
-				} else {
-					log.Printf("[ВОРКЕР #%d] Не удалось передать полученный конфиг в канал (канал занят/заблокирован)", sessionID)
-				}
+			if configOp.DeliverConfig(conf, configCh, 2*time.Second) {
+				configDelivered = true
+				log.Printf("[ВОРКЕР #%d] Конфиг успешно получен и передан в канал", sessionID)
 			} else {
-				select {
-				case configCh <- conf:
-					configDelivered = true
-					log.Printf("[ВОРКЕР #%d] Конфиг получен", sessionID)
-				case <-time.After(2 * time.Second):
-					log.Printf("[ВОРКЕР #%d] Таймаут передачи конфига в канал", sessionID)
-				}
+				log.Printf("[ВОРКЕР #%d] Не удалось передать полученный конфиг в канал (канал занят/заблокирован)", sessionID)
 			}
 		} else {
 			log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг (NOCONF), повторим позже", sessionID)
-			if cfgCoord != nil {
-				cfgCoord.ReleaseWithCooldown(3 * time.Second)
-			}
+			configOp.ReleaseWithCooldown(3 * time.Second)
 		}
 	} else {
 		if authErr := SendAuth(dtlsConn, deviceID, password); authErr != nil {

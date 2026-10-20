@@ -400,8 +400,7 @@ func main() {
 
 	var prevWaitReady <-chan struct{}
 
-	var configSent int32
-	var configRequestInFlight int32
+	cfgCoord := NewConfigCoordinator()
 
 	for g := 0; g < numGroups; g++ {
 		var myWaitReady <-chan struct{}
@@ -439,7 +438,7 @@ func main() {
 		go func(groupID int, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
 			defer wg.Done()
 			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort,
-				configChan, workerIds, &pauseFlag, *deviceID, *connPassword, stats, waitR, sigR, &configSent, &configRequestInFlight)
+				configChan, workerIds, &pauseFlag, *deviceID, *connPassword, stats, waitR, sigR, cfgCoord)
 		}(gID, cc, ids, g, myWaitReady, mySignalReady)
 	}
 

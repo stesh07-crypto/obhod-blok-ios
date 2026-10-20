@@ -16,7 +16,7 @@ const workersPerGroup = 9
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
 func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, peer *net.UDPAddr, d *Dispatcher, localPort string,
-	configChan chan<- string, workerIDs []int, pauseFlag *int32, deviceID, password string, stats *Stats, waitReady <-chan struct{}, signalReady chan<- struct{}, configSent *int32, configRequestInFlight *int32) {
+	configChan chan<- string, workerIDs []int, pauseFlag *int32, deviceID, password string, stats *Stats, waitReady <-chan struct{}, signalReady chan<- struct{}, cfgCoord *ConfigCoordinator) {
 	var signalOnce sync.Once
 	releaseSignalReady := func() {
 		if signalReady != nil {
@@ -121,7 +121,6 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		groupID, hsTimeout, HandshakeConcurrency, BuildNumber, SourceCommit)
 
 	var wg sync.WaitGroup
-	cfgCoord := NewConfigCoordinator(configSent, configRequestInFlight)
 
 	for i, wid := range workerIDs {
 		wg.Add(1)
@@ -149,12 +148,12 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 					return
 				}
 
-				getConf := false
-				if shouldGetConfig && !cfgCoord.IsConfigSent() {
-					getConf = cfgCoord.TryAcquire()
+				var configOp *ConfigOperation
+				if shouldGetConfig && cfgCoord != nil && !cfgCoord.IsConfigSent() {
+					configOp = cfgCoord.TryAcquire()
 				}
 				var cc chan<- string
-				if getConf {
+				if configOp != nil {
 					cc = configChan
 				}
 
@@ -163,7 +162,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				attemptID++ // Монотонный идентификатор попытки — никогда не сбрасывается!
 
 				_, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
-					getConf, cfgCoord, cc, wid, &credsSnapshot, deviceID, password, stats)
+					configOp, cc, wid, &credsSnapshot, deviceID, password, stats)
 
 				quotaRetry := false
 				transientSocketRetry := false

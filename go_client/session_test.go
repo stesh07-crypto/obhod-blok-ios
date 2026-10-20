@@ -179,8 +179,8 @@ func TestDTLSTimeout_SessionModeSelection(t *testing.T) {
 	if to := getTimeout(tpExperiment); to != 20*time.Second {
 		t.Fatalf("expected 20s for tpExperiment, got %v", to)
 	}
-	if to := getTimeout(tpDefault); to != 20*time.Second {
-		t.Fatalf("expected default 20s, got %v", to)
+	if to := getTimeout(tpDefault); to != HandshakeTimeoutControl {
+		t.Fatalf("expected control default 50s, got %v", to)
 	}
 }
 
