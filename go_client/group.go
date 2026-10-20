@@ -121,6 +121,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 		groupID, hsTimeout, HandshakeConcurrency, BuildNumber, SourceCommit)
 
 	var wg sync.WaitGroup
+	cfgCoord := NewConfigCoordinator(configSent, configRequestInFlight)
 
 	for i, wid := range workerIDs {
 		wg.Add(1)
@@ -149,8 +150,8 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				}
 
 				getConf := false
-				if shouldGetConfig && atomic.LoadInt32(configSent) == 0 {
-					getConf = atomic.CompareAndSwapInt32(configRequestInFlight, 0, 1)
+				if shouldGetConfig && !cfgCoord.IsConfigSent() {
+					getConf = cfgCoord.TryAcquire()
 				}
 				var cc chan<- string
 				if getConf {
@@ -161,18 +162,11 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				curAttempt := attemptID
 				attemptID++ // Монотонный идентификатор попытки — никогда не сбрасывается!
 
-				configDelivered, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
-					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
+				_, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
+					getConf, cfgCoord, cc, wid, &credsSnapshot, deviceID, password, stats)
 
 				quotaRetry := false
 				transientSocketRetry := false
-				if getConf {
-					if configDelivered {
-						atomic.StoreInt32(configSent, 1)
-					} else {
-						atomic.StoreInt32(configRequestInFlight, 0)
-					}
-				}
 
 				if sessErr != nil {
 					if ctx.Err() != nil {

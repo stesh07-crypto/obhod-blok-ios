@@ -113,6 +113,7 @@ func RunSession(
 	d *Dispatcher,
 	localPort string,
 	getConfig bool,
+	cfgCoord *ConfigCoordinator,
 	configCh chan<- string,
 	sessionID int,
 	creds *Credentials,
@@ -231,7 +232,9 @@ func RunSession(
 		return false, 0, fmt.Errorf("TURN Allocate (%s): %w", turnAddr, err)
 	}
 	defer func() {
-		relay.Close()
+		if relay != nil {
+			_ = relay.Close()
+		}
 		select {
 		case <-time.After(seatCoolFor):
 		case <-ctx.Done():
@@ -241,17 +244,67 @@ func RunSession(
 	// Reset error count on successful allocation
 	getStreamCache(creds.CacheStreamID).errorCount.Store(0)
 
+	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [ALLOCATE] Успешно выделен relay: time=%s, turn=%s, allocated=%s, vps=%s",
+		creds.GroupID, sessionID, creds.AttemptID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		turnAddr,
+		relay.LocalAddr().String(),
+		peer.String(),
+	)
 	log.Printf("[СЕССИЯ #%d] Relay: %s", sessionID, relay.LocalAddr())
 
 	// Pipe для DTLS ↔ TURN relay
 	pipeA, pipeB := connutil.AsyncPacketPipe()
 
 	sessCtx, sessCancel := context.WithCancel(ctx)
-	defer sessCancel()
+
+	var (
+		cleanupOnce sync.Once
+		sessionWg   sync.WaitGroup
+		relayWg     sync.WaitGroup
+		proxyWg     sync.WaitGroup
+		dtlsConn    *dtls.Conn
+	)
+
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			// 1. Отменяем контекст сессии — горутины получают <-sessCtx.Done()
+			sessCancel()
+
+			// 2. Немедленно устанавливаем дедлайны и закрываем I/O для гарантированной разблокировки сетевых вызовов
+			now := time.Now()
+			if dtlsConn != nil {
+				_ = dtlsConn.SetDeadline(now)
+				_ = dtlsConn.Close()
+			}
+			if pipeA != nil {
+				_ = pipeA.SetDeadline(now)
+				_ = pipeA.Close()
+			}
+			if pipeB != nil {
+				_ = pipeB.SetDeadline(now)
+				_ = pipeB.Close()
+			}
+			if relay != nil {
+				_ = relay.SetDeadline(now)
+				_ = relay.Close()
+			}
+
+			// 3. Ждём завершения запущенных горутин ТОЛЬКО ПОСЛЕ разблокировки I/O
+			proxyWg.Wait()
+			relayWg.Wait()
+			sessionWg.Wait()
+
+			// 4. Если получение конфига запрашивалось, но не было завершено успехом, освобождаем операцию с паузой повторов
+			if getConfig && cfgCoord != nil && !configDelivered {
+				cfgCoord.ReleaseWithCooldown(1 * time.Second)
+			}
+		})
+	}
+	defer cleanup()
 
 	// Keepalive goroutine (TURN binding request). Build 170 staggers only the
 	// initial phase; after that the existing 10s cadence is unchanged.
-	var sessionWg sync.WaitGroup
 	sessionWg.Add(1)
 	go func() {
 		defer sessionWg.Done()
@@ -271,7 +324,6 @@ func RunSession(
 	}()
 
 	// Relay ↔ Pipe proxy (with RTP obfuscation)
-	var relayWg sync.WaitGroup
 	relayWg.Add(2)
 
 	useWrap := len(tp.WrapKey) == wrapKeyLen
@@ -346,11 +398,11 @@ func RunSession(
 					out = wrapped
 				}
 			}
-			if atomic.CompareAndSwapUint32(&firstWrapDown, 0, 1) {
-				log.Printf("[СЕССИЯ #%d] [ДЕБАГ] Успешно зашифрован/отправлен ПЕРВЫЙ пакет на TURN Relay (%d байт)", sessionID, len(out))
-			}
 			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
 				return
+			}
+			if atomic.CompareAndSwapUint32(&firstWrapDown, 0, 1) {
+				log.Printf("[СЕССИЯ #%d] [ДЕБАГ] Успешно зашифрован/отправлен ПЕРВЫЙ пакет на TURN Relay (%d байт)", sessionID, len(out))
 			}
 		}
 	}()
@@ -398,12 +450,13 @@ func RunSession(
 		// No ServerName (SNI) — less detectable by DPI
 	}
 
-	dtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)
+	rawDtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)
 	if err != nil {
 		releaseSem()
 		HandshakeErrors.Add(1)
 		return false, 0, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
 	}
+	dtlsConn = rawDtlsConn
 	defer dtlsConn.Close()
 
 	hsTimeout := CurrentHandshakeTimeout
@@ -449,23 +502,40 @@ func RunSession(
 			if strings.Contains(errStr, "FATAL_AUTH") {
 				return false, time.Since(establishedStart), confErr
 			}
-			log.Printf("[ВОРКЕР #%d] Ошибка конфига: %v", sessionID, confErr)
+			log.Printf("[ВОРКЕР #%d] Ошибка получения конфига: %v", sessionID, confErr)
+			if cfgCoord != nil {
+				cfgCoord.ReleaseWithCooldown(3 * time.Second)
+			}
 		} else if conf != "" {
-			select {
-			case configCh <- conf:
-				configDelivered = true
-				log.Printf("[ВОРКЕР #%d] Конфиг получен", sessionID)
-			default:
-				configDelivered = true
-				log.Printf("[ВОРКЕР #%d] Конфиг уже был доставлен другим воркером", sessionID)
+			if cfgCoord != nil {
+				if cfgCoord.DeliverConfig(conf, configCh, 2*time.Second) {
+					configDelivered = true
+					log.Printf("[ВОРКЕР #%d] Конфиг успешно получен и передан в канал", sessionID)
+				} else {
+					log.Printf("[ВОРКЕР #%d] Не удалось передать полученный конфиг в канал (канал занят/заблокирован)", sessionID)
+				}
+			} else {
+				select {
+				case configCh <- conf:
+					configDelivered = true
+					log.Printf("[ВОРКЕР #%d] Конфиг получен", sessionID)
+				case <-time.After(2 * time.Second):
+					log.Printf("[ВОРКЕР #%d] Таймаут передачи конфига в канал", sessionID)
+				}
 			}
 		} else {
-			log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг, повторим позже", sessionID)
+			log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг (NOCONF), повторим позже", sessionID)
+			if cfgCoord != nil {
+				cfgCoord.ReleaseWithCooldown(3 * time.Second)
+			}
 		}
 	} else {
 		if authErr := SendAuth(dtlsConn, deviceID, password); authErr != nil {
-			log.Printf("[ВОРКЕР #%d] Ошибка авторизации: %v", sessionID, authErr)
+			log.Printf("[ВОРКЕР #%d] Ошибка отправки авторизации (AUTH): %v", sessionID, authErr)
+			return false, time.Since(establishedStart), fmt.Errorf("ошибка отправки авторизации (AUTH): %w", authErr)
 		}
+		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [AUTH] Пакет авторизации отправлен (серверное подтверждение в протоколе отсутствует)",
+			creds.GroupID, sessionID, creds.AttemptID)
 	}
 
 	log.Printf("[ВОРКЕР #%d] [READY] Туннель готов к работе ✓", sessionID)
@@ -479,7 +549,6 @@ func RunSession(
 	defer d.Unregister(slot)
 
 	// Proxy DTLS ↔ Dispatcher
-	var proxyWg sync.WaitGroup
 	proxyWg.Add(3) // +1 for keepalive goroutine
 
 	stopDTLS := context.AfterFunc(sessCtx, func() {
@@ -523,14 +592,14 @@ func RunSession(
 					return
 				}
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(sessionReadTimeout))
-				if atomic.CompareAndSwapUint32(&firstDtlsWrite, 0, 1) {
-					log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Отправлен ПЕРВЫЙ пакет в DTLS-соединение (%d байт)", sessionID, len(pkt))
-				}
 				_, writeErr := dtlsConn.Write(pkt)
 				putPktBuf(pkt)
 				if writeErr != nil {
 					log.Printf("[ВОРКЕР #%d] Ошибка Writer: %v", sessionID, writeErr)
 					return
+				}
+				if atomic.CompareAndSwapUint32(&firstDtlsWrite, 0, 1) {
+					log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Отправлен ПЕРВЫЙ пакет в DTLS-соединение (%d байт)", sessionID, len(pkt))
 				}
 			}
 		}
@@ -576,11 +645,7 @@ func RunSession(
 	}()
 
 	proxyWg.Wait()
-	sessCancel()
-	relayWg.Wait()
-	sessionWg.Wait()
-	_ = pipeA.Close()
-	_ = pipeB.Close()
+	cleanup()
 	log.Printf("[СЕССИЯ #%d] Завершена (активность после handshake=%v)", sessionID, time.Since(establishedStart).Round(time.Millisecond))
 	return configDelivered, time.Since(establishedStart), nil
 }
