@@ -300,6 +300,8 @@ func WDTT_Start(
 	iosCurrent = rt
 	iosMu.Unlock()
 
+	turnEndpointScheduler.Reset()
+
 	params := TunnelParams{
 		Peer:               peerStr,
 		VkHashes:           hashList,
@@ -389,6 +391,7 @@ func WDTT_WaitWireGuardReady(timeoutMilliseconds C.int) C.int {
 //export WDTT_NotifyNetworkChange
 func WDTT_NotifyNetworkChange() {
 	RotateVKHttpClients("смена физической сети")
+	turnEndpointScheduler.Reset()
 	rt := currentIOSRuntime()
 	if rt != nil {
 		rt.requestReconnect("смена физической сети")
@@ -681,6 +684,7 @@ func runTunnelLoop(rt *iosRuntime, params TunnelParams) {
 		if forced {
 			delay = 350 * time.Millisecond
 			backoff = time.Second
+			turnEndpointScheduler.Reset()
 		} else if err != nil {
 			iosLog(fmt.Sprintf("[ВОРКЕР] Ошибка: %v — повторяем транспорт", err), true)
 			delay = backoff

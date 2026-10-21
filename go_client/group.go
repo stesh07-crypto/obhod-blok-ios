@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"net"
@@ -142,6 +143,7 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 			shouldGetConfig := (configChan != nil)
 			attemptID := 1
 			failureStreak := 0
+			preferredTurnURL := ""
 
 			for {
 				if ctx.Err() != nil {
@@ -158,11 +160,30 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				}
 
 				credsSnapshot := coord.Snapshot(attemptID)
+				credsSnapshot.PreferredTurnURL = preferredTurnURL
 				curAttempt := attemptID
 				attemptID++ // Монотонный идентификатор попытки — никогда не сбрасывается!
 
 				_, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
 					configOp, cc, wid, &credsSnapshot, deviceID, password, stats)
+
+				var timeoutErr *DTLSHandshakeTimeoutError
+				if errors.As(sessErr, &timeoutErr) {
+					nextURL := nextUniqueTurnURL(credsSnapshot.TurnURLs, tp, timeoutErr.Endpoint)
+					if nextURL != "" {
+						preferredTurnURL = nextURL
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] DTLS_TIMEOUT на %s — следующая попытка через %s",
+							groupID, wid, curAttempt, timeoutErr.Endpoint, nextURL)
+					} else {
+						preferredTurnURL = ""
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] DTLS_TIMEOUT на %s — альтернативного endpoint нет",
+							groupID, wid, curAttempt, timeoutErr.Endpoint)
+					}
+				} else {
+					// После успешной сессии или другой ошибки возвращаемся к
+					// исходному распределению sessionID % len(urls).
+					preferredTurnURL = ""
+				}
 
 				quotaRetry := false
 				transientSocketRetry := false
@@ -336,13 +357,14 @@ type TurnParams struct {
 
 // Credentials — учетные данные TURN
 type Credentials struct {
-	User          string
-	Pass          string
-	TurnURLs      []string
-	CacheStreamID int
-	Generation    uint64
-	GroupID       int
-	AttemptID     int
+	User             string
+	Pass             string
+	TurnURLs         []string
+	CacheStreamID    int
+	Generation       uint64
+	GroupID          int
+	AttemptID        int
+	PreferredTurnURL string
 }
 
 type credRefreshOp struct {

@@ -30,6 +30,9 @@ const (
 	keepaliveInterval     = 15 * time.Second
 	keepaliveStaggerSlots = 2000 // 0..1999 ms deterministic phase spread
 	seatCoolFor           = 1200 * time.Millisecond // VK TURN relay seat retention window (build 430)
+	// Ограничение на DNS/Dial/Allocate, чтобы зависание не переехало из DTLS
+	// в подготовку TURN. Сам DTLS handshake по-прежнему ограничен 50 секундами.
+	turnPreparationTimeout = 20 * time.Second
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -125,42 +128,84 @@ func RunSession(
 		defer configOp.ReleaseWithCooldown(3 * time.Second)
 	}
 
+	// Контекст нужен планировщику TURN и ограниченной сетевой подготовке.
+	// cleanup ниже отменяет его ещё раз, это безопасно.
+	sessCtx, sessCancel := context.WithCancel(ctx)
+	defer sessCancel()
+
 	configDelivered := false
 	var firstWrapUp uint32
 	var firstWrapDown uint32
 	var firstDtlsWrite uint32
 	var firstDtlsRead uint32
 
-	if len(creds.TurnURLs) == 0 {
-		return false, 0, fmt.Errorf("нет TURN URL в учетных данных")
-	}
-	selectedURL := creds.TurnURLs[sessionID%len(creds.TurnURLs)]
-
-	urlhost, urlport, err := net.SplitHostPort(selectedURL)
+	candidates, err := buildTurnEndpointCandidates(creds.TurnURLs, tp)
 	if err != nil {
-		return false, 0, fmt.Errorf("разбор TURN URL %q: %w", selectedURL, err)
+		return false, 0, err
 	}
-	if tp.Host != "" {
-		urlhost = tp.Host
-	}
-	if tp.Port != "" {
-		urlport = tp.Port
-	}
-	turnAddr := net.JoinHostPort(urlhost, urlport)
 
-	// Транспорт: всегда UDP
-	resolved, err := net.ResolveUDPAddr("udp", turnAddr)
-	if err != nil {
-		return false, 0, fmt.Errorf("резолв TURN: %w", err)
+	// Первая попытка сохраняет прежнее распределение sessionID % len(urls).
+	// PreferredTurnURL задаётся воркером только после DTLS_TIMEOUT.
+	preferredURL := creds.PreferredTurnURL
+	if preferredURL == "" {
+		preferredURL = creds.TurnURLs[sessionID%len(creds.TurnURLs)]
 	}
-	c, err := net.DialUDP("udp", nil, resolved)
+
+	HandshakesWaiting.Add(1)
+	semStart := time.Now()
+	permit, err := turnEndpointScheduler.Acquire(sessCtx, preferredURL, candidates)
+	HandshakesWaiting.Add(-1)
+	if err != nil {
+		return false, 0, fmt.Errorf("ожидание TURN endpoint: %w", err)
+	}
+	semWait := time.Since(semStart)
+
+	HandshakesInFlight.Add(1)
+	outcome := turnOutcomeOther
+	var permitOnce sync.Once
+	releasePermit := func() {
+		permitOnce.Do(func() {
+			if sessCtx.Err() != nil && outcome == turnOutcomeOther {
+				outcome = turnOutcomeCanceled
+			}
+			permit.Finish(outcome)
+			HandshakesInFlight.Add(-1)
+		})
+	}
+	defer releasePermit()
+
+	selectedURL := permit.URL()
+	turnAddr := permit.Endpoint()
+
+	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [SEM] Ожидание разрешения TURN/handshake: %v (hs_активно=%d, в_очереди=%d, endpoint=%s, занято=%d/%d)",
+		creds.GroupID, sessionID, creds.AttemptID, semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load(), turnAddr, len(handshakeSem), cap(handshakeSem))
+
+	// Вся сетевая подготовка идёт уже под разрешением планировщика.
+	// DialContext ограничен тем же prepCtx, что и Allocate.
+	prepCtx, prepCancel := context.WithTimeout(sessCtx, turnPreparationTimeout)
+	defer prepCancel()
+
+	var dialer net.Dialer
+	rawConn, err := dialer.DialContext(prepCtx, "udp", turnAddr)
 	if err != nil {
 		return false, 0, fmt.Errorf("подключение TURN UDP: %w", err)
+	}
+	c, ok := rawConn.(*net.UDPConn)
+	if !ok {
+		_ = rawConn.Close()
+		return false, 0, fmt.Errorf("TURN UDP: неожиданный тип соединения %T", rawConn)
 	}
 	defer c.Close()
 	_ = c.SetReadBuffer(socketBufSize)
 	_ = c.SetWriteBuffer(socketBufSize)
 	var turnConn net.PacketConn = &connectedUDPConn{c}
+
+	// Pion повторно резолвит адрес в NewClient. Передаём уже разрешённый
+	// IP:port, чтобы DNS-задержка не обходила prepCtx.
+	turnClientAddr := turnAddr
+	if remote := rawConn.RemoteAddr(); remote != nil {
+		turnClientAddr = remote.String()
+	}
 
 	log.Printf("[СЕССИЯ #%d] TURN UDP (%s)", sessionID, turnAddr)
 
@@ -177,8 +222,8 @@ func RunSession(
 	// The zero-value stdnet.Net provides everything this UDP client uses
 	// without performing the unnecessary interface enumeration.
 	tc, err := turn.NewClient(&turn.ClientConfig{
-		STUNServerAddr:         turnAddr,
-		TURNServerAddr:         turnAddr,
+		STUNServerAddr:         turnClientAddr,
+		TURNServerAddr:         turnClientAddr,
 		Conn:                   turnConn,
 		Net:                    new(stdnet.Net),
 		Username:               creds.User,
@@ -195,7 +240,32 @@ func RunSession(
 		return false, 0, fmt.Errorf("TURN Listen: %w", err)
 	}
 
+	// Allocate не принимает context, поэтому отмена/таймаут закрывают транзакцию
+	// и UDP-сокет; ожидание ограничено turnPreparationTimeout.
+	var prepAborted atomic.Bool
+	prepAbortDone := make(chan struct{})
+	stopPrepAbort := context.AfterFunc(prepCtx, func() {
+		prepAborted.Store(true)
+		tc.Close()
+		_ = c.Close()
+		close(prepAbortDone)
+	})
 	relay, err := tc.Allocate()
+	if !stopPrepAbort() {
+		<-prepAbortDone
+	}
+	prepErr := prepCtx.Err()
+	allocTimedOut := prepAborted.Load() || prepErr != nil
+	prepCancel()
+	if allocTimedOut {
+		if relay != nil {
+			_ = relay.Close()
+		}
+		if err != nil {
+			return false, 0, fmt.Errorf("TURN подготовка: %w", err)
+		}
+		return false, 0, fmt.Errorf("TURN подготовка: %w", prepErr)
+	}
 	if err != nil {
 		var turnErr *stun.TurnError
 		if errors.As(err, &turnErr) {
@@ -260,8 +330,6 @@ func RunSession(
 
 	// Pipe для DTLS ↔ TURN relay
 	pipeA, pipeB := connutil.AsyncPacketPipe()
-
-	sessCtx, sessCancel := context.WithCancel(ctx)
 
 	var (
 		cleanupOnce sync.Once
@@ -413,33 +481,6 @@ func RunSession(
 		return false, 0, fmt.Errorf("генерация сертификата: %w", err)
 	}
 
-	// Acquire handshake semaphore
-	HandshakesWaiting.Add(1)
-	semStart := time.Now()
-	select {
-	case handshakeSem <- struct{}{}:
-		HandshakesWaiting.Add(-1)
-	case <-sessCtx.Done():
-		HandshakesWaiting.Add(-1)
-		HandshakeCanceled.Add(1)
-		semWait := time.Since(semStart)
-		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Ожидание слота отменено (очередь=%v, в_очереди=%d, hs_активно=%d): %v",
-			creds.GroupID, sessionID, creds.AttemptID, semWait.Round(time.Millisecond), HandshakesWaiting.Load(), HandshakesInFlight.Load(), sessCtx.Err())
-		return false, 0, fmt.Errorf("DTLS семафор отменён (очередь=%v): %w", semWait.Round(time.Millisecond), sessCtx.Err())
-	}
-	semWait := time.Since(semStart)
-	HandshakesInFlight.Add(1)
-
-	semReleased := false
-	releaseSem := func() {
-		if !semReleased {
-			semReleased = true
-			<-handshakeSem
-			HandshakesInFlight.Add(-1)
-		}
-	}
-	defer releaseSem()
-
 	dtlsCfg := &dtls.Config{
 		Certificates:          []tls.Certificate{cert},
 		InsecureSkipVerify:    true,
@@ -452,7 +493,8 @@ func RunSession(
 
 	rawDtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)
 	if err != nil {
-		releaseSem()
+		outcome = turnOutcomeOther
+		releasePermit()
 		HandshakeErrors.Add(1)
 		return false, 0, fmt.Errorf("DTLS клиент (%s): %w", turnAddr, err)
 	}
@@ -470,26 +512,35 @@ func RunSession(
 	err = dtlsConn.HandshakeContext(hctx)
 	hsDur := time.Since(hsStart)
 	hcancel()
-	releaseSem() // Освобождаем слот семафора сразу после завершения вызова handshake
 
 	if err != nil {
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
-			HandshakeTimeout.Add(1)
-			return false, 0, fmt.Errorf("DTLS_TIMEOUT: таймаут рукопожатия DTLS (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
-				turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
-		}
-		if sessCtx.Err() != nil {
+		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Ошибка handshake (%v, semWait=%v, hs_активно=%d, в_очереди=%d, endpoint=%s): %v",
+			creds.GroupID, sessionID, creds.AttemptID, hsDur.Round(time.Millisecond), semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load(), turnAddr, err)
+
+		if sessCtx.Err() != nil || ctx.Err() != nil {
 			HandshakeCanceled.Add(1)
-		} else {
-			HandshakeErrors.Add(1)
+			outcome = turnOutcomeCanceled
+			releasePermit()
+			return false, 0, sessCtx.Err()
 		}
+		if isTimeoutError(err) {
+			HandshakeTimeout.Add(1)
+			outcome = turnOutcomeTimeout
+			releasePermit()
+			return false, 0, &DTLSHandshakeTimeoutError{Endpoint: turnAddr, TurnURL: selectedURL, Err: err}
+		}
+		HandshakeErrors.Add(1)
+		outcome = turnOutcomeOther
+		releasePermit()
 		return false, 0, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
 	}
+
+	outcome = turnOutcomeSuccess
+	releasePermit()
 	HandshakeSuccess.Add(1)
 	establishedStart := time.Now()
-	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d)",
-		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load())
+	log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Соединение установлено ✓ (relay=%s, gen=%d, очередь=%v, hs=%v, ok=%d, tmout=%d, endpoint=%s)",
+		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), hsDur.Round(time.Millisecond), HandshakeSuccess.Load(), HandshakeTimeout.Load(), turnAddr)
 
 	stats.ActiveConnections.Add(1)
 	defer stats.ActiveConnections.Add(-1)
