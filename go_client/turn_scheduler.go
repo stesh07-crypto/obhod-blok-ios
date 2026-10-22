@@ -307,14 +307,15 @@ func (s *turnScheduler) Reset() {
 	s.mu.Lock()
 	// Активные разрешения переживают сброс оценки: их всё ещё нужно
 	// освободить, а per-endpoint лимит нельзя обходить во время смены сети.
+	// Сохраняем идентичность объектов состояния, чтобы отмена ожидающего
+	// Acquire уменьшала счётчик active в актуальной карте.
 	next := make(map[string]*turnEndpointState, len(s.endpoints))
 	for key, st := range s.endpoints {
 		if st.active > 0 {
-			next[key] = &turnEndpointState{
-				endpoint: st.endpoint,
-				active:   st.active,
-				lastUsed: st.lastUsed,
-			}
+			st.failures = 0
+			st.pausedUntil = time.Time{}
+			st.probing = false
+			next[key] = st
 		}
 	}
 	s.endpoints = next

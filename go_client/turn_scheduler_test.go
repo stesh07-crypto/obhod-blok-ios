@@ -728,3 +728,102 @@ func TestDTLSHandshakeTimeoutErrorPreservesEndpoint(t *testing.T) {
 		t.Fatalf("errors.As не вернул endpoint: %+v", target)
 	}
 }
+
+func TestTurnSchedulerResetThenCancelGlobalWaitReleasesEndpoint(t *testing.T) {
+	clock := newSchedulerTestClock()
+	s := newTurnScheduler(make(chan struct{}, 3), clock.Now)
+	candidates := schedulerTestCandidates(t,
+		"turn:1.1.1.1:3478",
+		"turn:2.2.2.2:3478",
+		"turn:3.3.3.3:3478",
+		"turn:4.4.4.4:3478",
+	)
+
+	// Займи все три глобальных слота разрешениями для адресов A, B и C.
+	p1 := mustAcquireTurnPermit(t, s, "turn:1.1.1.1:3478", candidates)
+	p2 := mustAcquireTurnPermit(t, s, "turn:2.2.2.2:3478", candidates)
+	p3 := mustAcquireTurnPermit(t, s, "turn:3.3.3.3:3478", candidates)
+	if got := len(s.global); got != 3 {
+		t.Fatalf("занято глобальных слотов = %d, ожидалось 3", got)
+	}
+
+	// Запусти Acquire() для D с набором альтернатив.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.Acquire(ctx, "turn:4.4.4.4:3478", candidates)
+		errCh <- err
+	}()
+
+	// Дождись подтверждения, что D зарезервирован (active == 1), но глобальный слот ещё не получен.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snap := findEndpointSnapshot(t, s, "4.4.4.4:3478")
+		if snap.Active == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("endpoint D не перешёл в active == 1 до таймаута")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(s.global); got != 3 {
+		t.Fatalf("ожидающая D попытка не должна занимать глобальный слот: занято %d", got)
+	}
+
+	// Вызови Reset().
+	s.Reset()
+
+	// Отмени контекст ожидающего Acquire() для D.
+	cancel()
+
+	// Проверь, что он вернул context.Canceled.
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ожидался context.Canceled, получено: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire не завершился после отмены контекста")
+	}
+
+	// Проверь через Snapshot() актуальную карту: у D active == 0.
+	snapD := findEndpointSnapshot(t, s, "4.4.4.4:3478")
+	if snapD.Active != 0 {
+		t.Fatalf("после отмены у D active = %d, ожидалось 0", snapD.Active)
+	}
+
+	// Проверь, что три исходных глобальных слота всё ещё заняты.
+	if got := len(s.global); got != 3 {
+		t.Fatalf("исходные глобальные слоты должны быть заняты: занято %d, ожидалось 3", got)
+	}
+
+	// Освободи исходные разрешения и проверь, что глобальных слотов и активных резерваций не осталось.
+	p1.Finish(turnOutcomeSuccess)
+	p2.Finish(turnOutcomeSuccess)
+	p3.Finish(turnOutcomeSuccess)
+
+	if got := len(s.global); got != 0 {
+		t.Fatalf("после освобождения исходных разрешений занято глобальных слотов: %d, ожидалось 0", got)
+	}
+	for _, snap := range s.Snapshot() {
+		if snap.Active != 0 {
+			t.Fatalf("после освобождения у %s active = %d, ожидалось 0", snap.Endpoint, snap.Active)
+		}
+	}
+
+	// Повторно запроси D и проверь, что разрешение успешно получается и освобождается.
+	pD := mustAcquireTurnPermit(t, s, "turn:4.4.4.4:3478", candidates)
+	if pD.Endpoint() != "4.4.4.4:3478" {
+		t.Fatalf("повторный запрос D выбрал %s, ожидался 4.4.4.4:3478", pD.Endpoint())
+	}
+	pD.Finish(turnOutcomeSuccess)
+	if snap := findEndpointSnapshot(t, s, "4.4.4.4:3478"); snap.Active != 0 {
+		t.Fatalf("после Finish pD active = %d, ожидалось 0", snap.Active)
+	}
+	if got := len(s.global); got != 0 {
+		t.Fatalf("после Finish pD занято глобальных слотов: %d, ожидалось 0", got)
+	}
+}
+
