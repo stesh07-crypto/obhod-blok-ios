@@ -98,6 +98,9 @@ func (d *Dispatcher) Register(w *WorkerSlot) {
 	d.workers = append(d.workers, w)
 	count := len(d.workers)
 	d.mu.Unlock()
+	if d.stats != nil {
+		d.stats.WorkerSlots.Store(int32(count))
+	}
 	log.Printf("[ДИСП] Воркер #%d зарегистрирован (всего: %d)", w.ID, count)
 }
 
@@ -116,6 +119,9 @@ func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 	}
 	d.rrCount = 0
 	d.mu.Unlock()
+	if d.stats != nil {
+		d.stats.WorkerSlots.Store(int32(remaining))
+	}
 	log.Printf("[ДИСП] Воркер #%d отключён (осталось: %d)", slot.ID, remaining)
 }
 

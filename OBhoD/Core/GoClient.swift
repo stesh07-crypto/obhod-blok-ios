@@ -178,6 +178,14 @@ enum GoClient {
         WDTT_RequestReconnect() != 0
     }
 
+    /// Ask Go to rebuild the data plane after the app's own end-to-end probe
+    /// failed. Go applies its own cooldown and attempt budget. Returns false when
+    /// the request was rejected or repair is not needed.
+    @discardableResult
+    static func requestRepair() -> Bool {
+        WDTT_RequestRepair() != 0
+    }
+
     static func wakeHealthCheck() {
         WDTT_WakeHealthCheck()
     }

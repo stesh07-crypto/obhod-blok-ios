@@ -76,6 +76,8 @@ final class TunnelManager: ObservableObject {
     private var vpnManager: NETunnelProviderManager?
     private var statusObserver: AnyCancellable?
     private var extensionPoller: AnyCancellable?
+    private var healthObserver: AnyCancellable?
+    private var lastAutomaticRepairAt: Date?
 
     private let defaults = AppGroup.sharedDefaults ?? UserDefaults.standard
     private var remoteLogMirror: [String] = []
@@ -85,6 +87,7 @@ final class TunnelManager: ObservableObject {
     private init() {
         observeVPNStatus()
         startExtensionPolling()
+        observeConnectionHealth()
         Task { await loadVPNManager() }
     }
 
@@ -185,6 +188,47 @@ final class TunnelManager: ObservableObject {
             }
         } catch {
             appendLog("[СЕТЬ] Не удалось отправить команду переподключения: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// The app's own probe (TCP through the tunnel) is the only fresh end-to-end
+    /// signal. When it fails while the tunnel claims to be running, ask Go to
+    /// rebuild the data plane. Go applies its own cooldown and attempt budget;
+    /// the local guard keeps repeated UI-driven requests away.
+    private func observeConnectionHealth() {
+        healthObserver = ConnectionHealthMonitor.shared.$reachabilityPoor
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] poor in
+                guard poor else { return }
+                Task { @MainActor [weak self] in
+                    self?.requestAutomaticRepair()
+                }
+            }
+    }
+
+    private func requestAutomaticRepair() {
+        guard isRunning, !isDisconnecting, !isConnecting, !isTransportRecovering else { return }
+        if let last = lastAutomaticRepairAt, Date().timeIntervalSince(last) < 90 { return }
+        guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
+
+        lastAutomaticRepairAt = Date()
+        do {
+            try session.sendProviderMessage(Data("repair".utf8)) { [weak self] responseData in
+                let response = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch response {
+                    case "ok":
+                        self.appendLog("[СЕТЬ] Проверка связи не прошла — запущен ремонт транспорта", isError: false)
+                    case "rejected":
+                        self.appendLog("[ДИАГ] Ремонт отклонён защитой от циклических перезапусков", isError: false)
+                    default:
+                        self.appendLog("[СЕТЬ] Extension не подтвердил ремонт транспорта", isError: true)
+                    }
+                }
+            }
+        } catch {
+            appendLog("[СЕТЬ] Не удалось отправить команду ремонта: \(error.localizedDescription)", isError: true)
         }
     }
 

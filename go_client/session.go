@@ -636,11 +636,15 @@ func RunSession(
 					return
 				}
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(sessionReadTimeout))
+				pktLen := len(pkt)
 				_, writeErr := dtlsConn.Write(pkt)
 				putPktBuf(pkt)
 				if writeErr != nil {
 					log.Printf("[ВОРКЕР #%d] Ошибка Writer: %v", sessionID, writeErr)
 					return
+				}
+				if stats != nil {
+					stats.DtlsTxBytes.Add(int64(pktLen))
 				}
 				if atomic.CompareAndSwapUint32(&firstDtlsWrite, 0, 1) {
 					log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Отправлен ПЕРВЫЙ пакет в DTLS-соединение (%d байт)", sessionID, len(pkt))
@@ -671,6 +675,10 @@ func RunSession(
 			// Skip keepalive pong from server
 			if n == 1 && b[0] == keepaliveByte {
 				continue
+			}
+
+			if stats != nil {
+				stats.DtlsRxBytes.Add(int64(n))
 			}
 
 			if atomic.CompareAndSwapUint32(&firstDtlsRead, 0, 1) {

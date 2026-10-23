@@ -10,6 +10,13 @@ type Stats struct {
 	TotalBytesUp      atomic.Int64
 	TotalBytesDown    atomic.Int64
 	ActiveConnections atomic.Int32
+	// DtlsTxBytes/DtlsRxBytes isolate the dispatcher->DTLS and DTLS->dispatcher
+	// legs, so a stalled data plane can be localised without a packet capture.
+	DtlsTxBytes atomic.Int64
+	DtlsRxBytes atomic.Int64
+	// WorkerSlots is the number of DTLS sessions currently registered in the
+	// dispatcher. It can differ from ActiveConnections while sessions rotate.
+	WorkerSlots atomic.Int32
 }
 
 func NewStats() *Stats {

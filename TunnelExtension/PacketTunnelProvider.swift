@@ -196,6 +196,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let accepted = GoClient.requestTransportReconnect()
             appendLog("[ДИАГ] providerMessage reconnect: accepted=\(accepted)", isError: false)
             completionHandler?(Data((accepted ? "ok" : "busy").utf8))
+        case "repair":
+            let accepted = GoClient.requestRepair()
+            appendLog("[ДИАГ] providerMessage repair: accepted=\(accepted)", isError: false)
+            completionHandler?(Data((accepted ? "ok" : "rejected").utf8))
         default:
             completionHandler?(Data("unsupported".utf8))
         }
