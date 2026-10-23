@@ -260,12 +260,17 @@ func RunSession(
 		if relay != nil {
 			_ = relay.Close()
 		}
-		if err != nil {
-			return false, 0, fmt.Errorf("TURN подготовка: %w", err)
-		}
-		return false, 0, fmt.Errorf("TURN подготовка: %w", prepErr)
+		var allocOutcome turnHandshakeOutcome
+		var allocErr error
+		allocOutcome, allocErr = classifyAllocateFailure(ctx, "prepare", turnAddr, true, prepErr, err)
+		outcome = allocOutcome
+		return false, 0, allocErr
 	}
 	if err != nil {
+		if noAnswerOutcome, noAnswerErr := classifyAllocateFailure(ctx, "allocate", turnAddr, false, nil, err); noAnswerErr != nil {
+			outcome = noAnswerOutcome
+			return false, 0, noAnswerErr
+		}
 		var turnErr *stun.TurnError
 		if errors.As(err, &turnErr) {
 			switch turnErr.ErrorCodeAttr.Code {

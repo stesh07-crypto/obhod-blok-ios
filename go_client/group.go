@@ -167,8 +167,20 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 				_, establishedDur, sessErr := RunSession(ctx, tp, peer, d, localPort,
 					configOp, cc, wid, &credsSnapshot, deviceID, password, stats)
 
+				var allocateTimeoutErr *TurnAllocateTimeoutError
 				var timeoutErr *DTLSHandshakeTimeoutError
-				if errors.As(sessErr, &timeoutErr) {
+				if errors.As(sessErr, &allocateTimeoutErr) {
+					nextURL := nextUniqueTurnURL(credsSnapshot.TurnURLs, tp, allocateTimeoutErr.Endpoint)
+					if nextURL != "" {
+						preferredTurnURL = nextURL
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] ALLOCATE_TIMEOUT (stage=%s) на %s — следующая попытка через %s",
+							groupID, wid, curAttempt, allocateTimeoutErr.Stage, allocateTimeoutErr.Endpoint, nextURL)
+					} else {
+						preferredTurnURL = ""
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] ALLOCATE_TIMEOUT (stage=%s) на %s — альтернативного endpoint нет",
+							groupID, wid, curAttempt, allocateTimeoutErr.Stage, allocateTimeoutErr.Endpoint)
+					}
+				} else if errors.As(sessErr, &timeoutErr) {
 					nextURL := nextUniqueTurnURL(credsSnapshot.TurnURLs, tp, timeoutErr.Endpoint)
 					if nextURL != "" {
 						preferredTurnURL = nextURL
@@ -258,6 +270,9 @@ func WorkerGroup(ctx context.Context, groupID, hashIndex int, tp *TurnParams, pe
 						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Недостаток ёмкости сервера (508 Insufficient Capacity, relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case turnAllocAttrMissing:
 						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] Неполный STUN/TURN ответ (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
+					case isAllocateTimeout(sessErr):
+						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [TURN] ALLOCATE_TIMEOUT (relay=%s, streak=%d): %s",
+							groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case isDtlsTimeout:
 						log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Таймаут рукопожатия DTLS (relay=%s, streak=%d): %s", groupID, wid, curAttempt, turnRelay, failureStreak, errStr)
 					case turnAuthRejected:
