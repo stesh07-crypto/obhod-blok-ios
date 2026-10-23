@@ -256,6 +256,56 @@ func (rt *iosRuntime) snapshot(reason string) string {
 	return line
 }
 
+// snapshotAsync keeps diagnostics off the transport hot path: callers get a
+// start marker immediately, then the snapshot (including network probes) runs
+// in the background and reports its duration.
+func (rt *iosRuntime) snapshotAsync(reason string) {
+	if rt == nil {
+		return
+	}
+	iosLog(fmt.Sprintf("[ДИАГ] snapshot start reason=%s at=%s", reason, time.Now().Format(time.RFC3339)), false)
+	go func() {
+		start := time.Now()
+		rt.snapshot(reason)
+		iosLog(fmt.Sprintf("[ДИАГ] snapshot done reason=%s ms=%d", reason, time.Since(start).Milliseconds()), false)
+	}()
+}
+
+// dataPlaneSample is the cheap periodic probe of the data path: it reads only
+// in-process counters and the WireGuard UAPI, so it can run while the user
+// browses without adding latency.
+func (rt *iosRuntime) dataPlaneSample() {
+	now := time.Now()
+	up, down, _ := rt.statsSnapshot()
+
+	var (
+		active  int32
+		dtlsTx  int64
+		dtlsRx  int64
+		workers int32
+	)
+	rt.mu.Lock()
+	st := rt.stats
+	rt.mu.Unlock()
+	if st != nil {
+		active = st.ActiveConnections.Load()
+		dtlsTx = st.DtlsTxBytes.Load()
+		dtlsRx = st.DtlsRxBytes.Load()
+		workers = st.WorkerSlots.Load()
+	}
+
+	handshake, wgRx, wgTx, _ := rt.wgStats()
+	age := "none"
+	if !handshake.IsZero() {
+		age = now.Sub(handshake).Round(time.Second).String()
+	}
+
+	iosLog(fmt.Sprintf(
+		"[ДИАГ-ПОТОК] wg_hs=%s wg_rx=%d wg_tx=%d tun_up=%d tun_down=%d dtls_tx=%d dtls_rx=%d workers=%d active=%d",
+		age, wgRx, wgTx, up, down, dtlsTx, dtlsRx, workers, active,
+	), false)
+}
+
 // requestRepair rebuilds the Go transport after a confirmed failure, bounded by
 // defaultRepairPolicy so a broken network cannot cause a restart loop.
 func (rt *iosRuntime) requestRepair(reason string) bool {
@@ -265,6 +315,11 @@ func (rt *iosRuntime) requestRepair(reason string) bool {
 	// tunnel untouched and let iOS restore the path first.
 	if physical := rt.physicalProbe(2 * time.Second); !strings.HasPrefix(physical, "OK") {
 		iosLog(fmt.Sprintf("[ДИАГ] Ремонт отложен (%s): физическая сеть недоступна (phys=%s)", reason, physical), false)
+		return false
+	}
+
+	if rt.activeSessions() == 0 {
+		iosLog(fmt.Sprintf("[ДИАГ] Ремонт не требуется (%s): нет активных DTLS-сессий", reason), false)
 		return false
 	}
 
@@ -284,7 +339,8 @@ func (rt *iosRuntime) requestRepair(reason string) bool {
 	attempts := rt.repairAttempts
 	rt.mu.Unlock()
 
-	rt.snapshot("repair:" + reason)
+	rt.dataPlaneSample()
+	rt.snapshotAsync("repair:" + reason)
 	iosLog(fmt.Sprintf("[ДИАГ] Ремонт #%d: %s", attempts, reason), false)
 	return rt.requestReconnect("health: " + reason)
 }
@@ -423,6 +479,16 @@ func (rt *iosRuntime) statsSnapshot() (up, down int64, ok bool) {
 		return 0, 0, false
 	}
 	return stats.TotalBytesUp.Load(), stats.TotalBytesDown.Load(), true
+}
+
+func (rt *iosRuntime) activeSessions() int32 {
+	rt.mu.Lock()
+	stats := rt.stats
+	rt.mu.Unlock()
+	if stats == nil {
+		return 0
+	}
+	return stats.ActiveConnections.Load()
 }
 
 func (rt *iosRuntime) kickHealthCheck() {
@@ -597,7 +663,7 @@ func WDTT_NotifyNetworkChange() {
 	turnEndpointScheduler.Reset()
 	rt := currentIOSRuntime()
 	if rt != nil {
-		rt.snapshot("network-change")
+		rt.snapshotAsync("network-change")
 		rt.requestReconnect("смена физической сети")
 	}
 }
@@ -606,7 +672,7 @@ func WDTT_NotifyNetworkChange() {
 func WDTT_WakeHealthCheck() {
 	rt := currentIOSRuntime()
 	if rt != nil {
-		rt.snapshot("wake")
+		rt.snapshotAsync("wake")
 		rt.rekeyWireGuard()
 		rt.kickHealthCheck()
 	}
@@ -809,8 +875,8 @@ func runIOSHealthWatchdog(rt *iosRuntime) {
 		if handshake, _, _, wgOK := rt.wgStats(); wgOK {
 			if !handshake.IsZero() && now.Sub(handshake) < 90*time.Second {
 				rt.noteDataPlaneHealthy()
-			} else if dataPlaneStale(now, handshake, up, priorUp, 150*time.Second) {
-				rt.snapshot("wg-stale")
+			} else if shouldRepairStaleDataPlane(now, rt.activeSessions(), handshake, up, priorUp, 150*time.Second) {
+				rt.snapshotAsync("wg-stale")
 				if rt.requestRepair("нет свежего handshake WireGuard при исходящем трафике") {
 					resetClocks(now, up, down)
 					return
@@ -946,6 +1012,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 	defer runCancel()
 
 	rt.noteRunGeneration()
+	logFn(fmt.Sprintf("[ДИАГ] storage_dir_set=%t", profileStorageDirectory() != ""), false)
 	logFn(fmt.Sprintf("[ГО-ВОРКЕР] Инициализация сессии (ядро: Build #%s, commit %s)...", BuildNumber, SourceCommit), false)
 	if len(params.VkHashes) == 0 {
 		return fmt.Errorf("нет VK-хешей")
@@ -1005,6 +1072,19 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 
 	disp := NewDispatcher(runCtx, localConn, stats)
 
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				rt.dataPlaneSample()
+			}
+		}
+	}()
+
 	configCh := make(chan string, 1)
 	configDone := make(chan struct{})
 	var wgDevice *device.Device
@@ -1053,7 +1133,7 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 			rt.setDataPlaneState(true, true)
 			rt.wgReadyOnce.Do(func() { close(rt.wgReady) })
 			logFn("[IOS-TUN] WireGuard поднят и готов к трафику", false)
-			rt.snapshot("wg-up")
+			rt.snapshotAsync("wg-up")
 
 		case <-runCtx.Done():
 			return
@@ -1135,20 +1215,28 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 
 	// A transport with live DTLS sessions but no WireGuard config is a dead
 	// tunnel that still reports "active". Never let it sit there: if the first
-	// GETCONF does not arrive in time, rebuild the transport.
+	// GETCONF does not arrive in time, rebuild the transport. Zero sessions mean
+	// credentials are still being fetched (captcha, cooldown); restarting there
+	// would only repeat the same authorization attempts.
 	var configTimedOut atomic.Bool
 	go func() {
-		timer := time.NewTimer(90 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-runCtx.Done():
-			return
-		case <-timer.C:
-			if applied, _, _ := rt.dataPlaneState(); !applied {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		started := time.Now()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				applied, _, _ := rt.dataPlaneState()
+				if !shouldRestartForMissingConfig(stats.ActiveConnections.Load(), applied, time.Since(started), 90*time.Second) {
+					continue
+				}
 				configTimedOut.Store(true)
-				logFn("[ДИАГ] Конфиг WireGuard не получен за 90с — перезапуск транспорта", true)
-				rt.snapshot("config-timeout")
+				logFn("[ДИАГ] Есть DTLS-сессии, но конфиг WireGuard не получен за 90с — перезапуск транспорта", true)
+				rt.snapshotAsync("config-timeout")
 				runCancel()
+				return
 			}
 		}
 	}()

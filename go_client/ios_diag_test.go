@@ -129,3 +129,38 @@ func TestDataPlaneStale(t *testing.T) {
 		t.Fatalf("старый handshake при росте TX — stale")
 	}
 }
+
+func TestShouldRestartForMissingConfig(t *testing.T) {
+	limit := 90 * time.Second
+
+	if shouldRestartForMissingConfig(0, false, 5*time.Minute, limit) {
+		t.Fatalf("без активных сессий перезапуск не нужен: ждём креды/капчу")
+	}
+	if shouldRestartForMissingConfig(70, false, 10*time.Second, limit) {
+		t.Fatalf("рано перезапускать: конфиг ещё может прийти")
+	}
+	if !shouldRestartForMissingConfig(70, false, limit, limit) {
+		t.Fatalf("сессии есть, конфига нет, лимит истёк — нужен перезапуск")
+	}
+	if shouldRestartForMissingConfig(70, true, 5*time.Minute, limit) {
+		t.Fatalf("конфиг получен — перезапуск не нужен")
+	}
+}
+
+func TestShouldRepairStaleDataPlane(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	maxAge := 150 * time.Second
+
+	if shouldRepairStaleDataPlane(now, 0, time.Time{}, 2000, 1000, maxAge) {
+		t.Fatalf("без активных сессий ремонт не запускается")
+	}
+	if shouldRepairStaleDataPlane(now, 70, now.Add(-30*time.Second), 2000, 1000, maxAge) {
+		t.Fatalf("свежий handshake — ремонт не нужен")
+	}
+	if !shouldRepairStaleDataPlane(now, 70, time.Time{}, 2000, 1000, maxAge) {
+		t.Fatalf("TX растёт, handshake нет — ремонт нужен")
+	}
+	if shouldRepairStaleDataPlane(now, 70, time.Time{}, 1000, 1000, maxAge) {
+		t.Fatalf("нет прироста TX — ремонт не нужен")
+	}
+}

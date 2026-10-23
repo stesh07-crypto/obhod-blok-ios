@@ -94,12 +94,15 @@ enum GoClient {
         // Build 175: embedded Go has no writable process CWD inside a
         // NetworkExtension. Give it the shared App Group explicitly so VK
         // identity files and captcha IPC survive the iOS sandbox correctly.
-        if let groupURL = FileManager.default.containerURL(
+        let groupURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: AppGroup.identifier
-        ) {
+        )
+        if let groupURL {
             setenv("WDTT_STORAGE_DIR", groupURL.path, 1)
+            NSLog("[WDTT-GO] App Group container available: %@", groupURL.path)
         } else {
             unsetenv("WDTT_STORAGE_DIR")
+            NSLog("[WDTT-GO] App Group container UNAVAILABLE for %@", AppGroup.identifier)
         }
 
         let pPeer = strdup(peer)

@@ -179,3 +179,23 @@ func dataPlaneStale(now time.Time, lastHandshake time.Time, tunUpNow, tunUpPrevi
 	}
 	return now.Sub(lastHandshake) >= handshakeMaxAge
 }
+
+// shouldRestartForMissingConfig decides whether a transport with live DTLS
+// sessions but no WireGuard config must be rebuilt. Zero active sessions means
+// credentials are still being fetched (for example waiting for a captcha), and
+// restarting there only repeats the same authorization attempts.
+func shouldRestartForMissingConfig(active int32, configApplied bool, elapsed, limit time.Duration) bool {
+	if configApplied || active <= 0 {
+		return false
+	}
+	return elapsed >= limit
+}
+
+// shouldRepairStaleDataPlane gates an automatic repair on a live data plane
+// attempt: no sessions means there is nothing to repair yet.
+func shouldRepairStaleDataPlane(now time.Time, active int32, lastHandshake time.Time, tunUpNow, tunUpPrevious int64, maxAge time.Duration) bool {
+	if active <= 0 {
+		return false
+	}
+	return dataPlaneStale(now, lastHandshake, tunUpNow, tunUpPrevious, maxAge)
+}
