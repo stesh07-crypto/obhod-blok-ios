@@ -352,6 +352,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handlePath(_ path: Network.NWPath, generation: UInt64) {
         guard isCurrent(generation) else { return }
 
+        GoClient.setPhysicalPath(available: path.status == .satisfied)
+
         pathDebounceWorkItem?.cancel()
 
         guard path.status == .satisfied else {

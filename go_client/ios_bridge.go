@@ -89,6 +89,7 @@ type iosRuntime struct {
 	lastRepair        time.Time
 	repairAttempts    int
 	repairWindowStart time.Time
+	physicalAvailable bool // last NWPathMonitor state reported by Swift; true until Swift reports
 
 	// Counters of the previous diagnostic snapshot, used to report deltas.
 	snapAt      time.Time
@@ -306,22 +307,23 @@ func (rt *iosRuntime) dataPlaneSample() {
 	), false)
 }
 
-// requestRepair rebuilds the Go transport after a confirmed failure, bounded by
-// defaultRepairPolicy so a broken network cannot cause a restart loop.
-func (rt *iosRuntime) requestRepair(reason string) bool {
+func (rt *iosRuntime) setPhysicalAvailable(available bool) {
+	rt.mu.Lock()
+	rt.physicalAvailable = available
+	rt.mu.Unlock()
+}
+
+func (rt *iosRuntime) physicalPathAvailable() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.physicalAvailable
+}
+
+// consumeRepairBudget is the single gate for every automatic transport rebuild.
+// It returns false when the cooldown or the per-window limit forbids another
+// restart, so callers must not cancel the attempt in that case.
+func (rt *iosRuntime) consumeRepairBudget(reason string) bool {
 	now := time.Now()
-
-	// A rebuild cannot help when the underlying network is gone: leave the
-	// tunnel untouched and let iOS restore the path first.
-	if physical := rt.physicalProbe(2 * time.Second); !strings.HasPrefix(physical, "OK") {
-		iosLog(fmt.Sprintf("[ДИАГ] Ремонт отложен (%s): физическая сеть недоступна (phys=%s)", reason, physical), false)
-		return false
-	}
-
-	if rt.activeSessions() == 0 {
-		iosLog(fmt.Sprintf("[ДИАГ] Ремонт не требуется (%s): нет активных DTLS-сессий", reason), false)
-		return false
-	}
 
 	rt.mu.Lock()
 	if rt.ctx.Err() != nil {
@@ -339,9 +341,31 @@ func (rt *iosRuntime) requestRepair(reason string) bool {
 	attempts := rt.repairAttempts
 	rt.mu.Unlock()
 
+	iosLog(fmt.Sprintf("[ДИАГ] Ремонт #%d: %s", attempts, reason), false)
+	return true
+}
+// requestRepair rebuilds the Go transport after a confirmed failure, bounded by
+// defaultRepairPolicy so a broken network cannot cause a restart loop.
+func (rt *iosRuntime) requestRepair(reason string) bool {
+	// Physical path state comes from NWPathMonitor via Swift. Network probes are
+	// diagnostic only: a reachable TURN path must stay repairable even when the
+	// public probe addresses are blocked.
+	if !rt.physicalPathAvailable() {
+		iosLog(fmt.Sprintf("[ДИАГ] Ремонт отложен (%s): физический путь недоступен по NWPathMonitor", reason), false)
+		return false
+	}
+
+	if rt.activeSessions() == 0 {
+		iosLog(fmt.Sprintf("[ДИАГ] Ремонт не требуется (%s): нет активных DTLS-сессий", reason), false)
+		return false
+	}
+
+	if !rt.consumeRepairBudget(reason) {
+		return false
+	}
+
 	rt.dataPlaneSample()
 	rt.snapshotAsync("repair:" + reason)
-	iosLog(fmt.Sprintf("[ДИАГ] Ремонт #%d: %s", attempts, reason), false)
 	return rt.requestReconnect("health: " + reason)
 }
 
@@ -394,6 +418,7 @@ func newIOSRuntime() *iosRuntime {
 		wgReady:    make(chan struct{}),
 		healthKick: make(chan struct{}, 1),
 		reconnectWake: make(chan struct{}, 1),
+		physicalAvailable: true,
 	}
 }
 
@@ -665,6 +690,17 @@ func WDTT_NotifyNetworkChange() {
 	if rt != nil {
 		rt.snapshotAsync("network-change")
 		rt.requestReconnect("смена физической сети")
+	}
+}
+
+// WDTT_SetPhysicalPath receives the current NWPathMonitor state from Swift so
+// repairs consult the real physical path instead of public probe addresses.
+//
+//export WDTT_SetPhysicalPath
+func WDTT_SetPhysicalPath(available C.int) {
+	rt := currentIOSRuntime()
+	if rt != nil {
+		rt.setPhysicalAvailable(available != 0)
 	}
 }
 
@@ -1231,6 +1267,9 @@ func runOnce(ctx context.Context, rt *iosRuntime, params TunnelParams, logFn fun
 				applied, _, _ := rt.dataPlaneState()
 				if !shouldRestartForMissingConfig(stats.ActiveConnections.Load(), applied, time.Since(started), 90*time.Second) {
 					continue
+				}
+				if !rt.consumeRepairBudget("config-timeout: нет ответа GETCONF") {
+					return
 				}
 				configTimedOut.Store(true)
 				logFn("[ДИАГ] Есть DTLS-сессии, но конфиг WireGuard не получен за 90с — перезапуск транспорта", true)

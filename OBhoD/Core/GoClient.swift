@@ -181,6 +181,12 @@ enum GoClient {
         WDTT_RequestReconnect() != 0
     }
 
+    /// Report the current physical path state from NWPathMonitor so Go repairs
+    /// never depend on public probe addresses.
+    static func setPhysicalPath(available: Bool) {
+        WDTT_SetPhysicalPath(available ? 1 : 0)
+    }
+
     /// Ask Go to rebuild the data plane after the app's own end-to-end probe
     /// failed. Go applies its own cooldown and attempt budget. Returns false when
     /// the request was rejected or repair is not needed.

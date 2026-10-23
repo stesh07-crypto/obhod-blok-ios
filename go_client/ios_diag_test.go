@@ -164,3 +164,32 @@ func TestShouldRepairStaleDataPlane(t *testing.T) {
 		t.Fatalf("нет прироста TX — ремонт не нужен")
 	}
 }
+
+func TestRepairBudgetStopsRepeatedRestarts(t *testing.T) {
+	policy := repairPolicy{cooldown: 0, window: 10 * time.Minute, max: 3}
+	now := time.Unix(1_800_000_000, 0)
+	var attempts int
+	var windowStart, last time.Time
+
+	allowedCount := 0
+	for i := 0; i < 10; i++ {
+		ok, _ := policy.allow(now, last, attempts, windowStart)
+		if ok {
+			attempts, windowStart = repairWindowState(now, windowStart, attempts, policy)
+			last = now
+			allowedCount++
+		}
+		now = now.Add(30 * time.Second)
+	}
+	if allowedCount != 3 {
+		t.Fatalf("за окно разрешено %d ремонтов, ожидалось 3", allowedCount)
+	}
+
+	if ok, why := policy.allow(now, last, attempts, windowStart); ok {
+		t.Fatalf("исчерпанный бюджет не остановил перезапуск: %q", why)
+	}
+
+	if ok, why := policy.allow(last.Add(11*time.Minute), last, attempts, windowStart); !ok {
+		t.Fatalf("после окна бюджет должен снова разрешать ремонт: %q", why)
+	}
+}
