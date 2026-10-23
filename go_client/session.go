@@ -165,10 +165,9 @@ func RunSession(
 	var permitOnce sync.Once
 	releasePermit := func() {
 		permitOnce.Do(func() {
-			if sessCtx.Err() != nil && outcome == turnOutcomeOther {
-				outcome = turnOutcomeCanceled
-			}
-			permit.Finish(outcome)
+			// Переписывать исход можно только по внешней отмене; внутренний
+			// тирдаун не должен маскировать timeout/teardown.
+			permit.Finish(permitOutcome(ctx, outcome))
 			HandshakesInFlight.Add(-1)
 		})
 	}
@@ -410,6 +409,11 @@ func RunSession(
 	})
 	defer stopRelay()
 
+	// Первичная причина внутреннего тирдауна: handshake в этом случае вернёт
+	// только context.Canceled, поэтому ошибку relay/pipe запоминаем до отмены
+	// сессии и передаём в SessionTeardownError.
+	var teardown teardownCause
+
 	// relay → pipeA (UNWRAP: strip RTP header + decrypt)
 	go func() {
 		defer relayWg.Done()
@@ -421,6 +425,7 @@ func RunSession(
 		for {
 			n, _, readErr := relay.ReadFrom(buf)
 			if readErr != nil {
+				teardown.record(fmt.Errorf("чтение TURN relay: %w", readErr))
 				return
 			}
 			payload := buf[:n]
@@ -440,6 +445,7 @@ func RunSession(
 				log.Printf("[СЕССИЯ #%d] [ДЕБАГ] Успешно расшифрован/получен ПЕРВЫЙ пакет от TURN Relay (%d байт)", sessionID, len(payload))
 			}
 			if _, writeErr := pipeA.WriteTo(payload, peer); writeErr != nil {
+				teardown.record(fmt.Errorf("запись в DTLS pipe: %w", writeErr))
 				return
 			}
 		}
@@ -453,6 +459,7 @@ func RunSession(
 		for {
 			n, _, readErr := pipeA.ReadFrom(b)
 			if readErr != nil {
+				teardown.record(fmt.Errorf("чтение DTLS pipe: %w", readErr))
 				return
 			}
 			out := b[:n]
@@ -467,6 +474,7 @@ func RunSession(
 				}
 			}
 			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
+				teardown.record(fmt.Errorf("запись в TURN relay: %w", writeErr))
 				return
 			}
 			if atomic.CompareAndSwapUint32(&firstWrapDown, 0, 1) {
@@ -511,28 +519,27 @@ func RunSession(
 		creds.GroupID, sessionID, creds.AttemptID, turnAddr, creds.Generation, semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load())
 	err = dtlsConn.HandshakeContext(hctx)
 	hsDur := time.Since(hsStart)
+	// Причину снимаем до собственной очистки: hcancel() не переписывает уже
+	// наступивший DeadlineExceeded, но диагностика не должна зависеть от порядка.
+	handshakeCtxErr := hctx.Err()
 	hcancel()
 
 	if err != nil {
 		log.Printf("[ГР #%d | ВОРКЕР #%d | ПОПЫТКА #%d] [DTLS] Ошибка handshake (%v, semWait=%v, hs_активно=%d, в_очереди=%d, endpoint=%s): %v",
 			creds.GroupID, sessionID, creds.AttemptID, hsDur.Round(time.Millisecond), semWait.Round(time.Millisecond), HandshakesInFlight.Load(), HandshakesWaiting.Load(), turnAddr, err)
 
-		if sessCtx.Err() != nil || ctx.Err() != nil {
-			HandshakeCanceled.Add(1)
-			outcome = turnOutcomeCanceled
-			releasePermit()
-			return false, 0, sessCtx.Err()
-		}
-		if isTimeoutError(err) {
+		var hsOut error
+		outcome, hsOut = classifyHandshakeFailure(ctx, sessCtx, handshakeCtxErr, err, teardown.get(), turnAddr, selectedURL)
+		switch outcome {
+		case turnOutcomeTimeout:
 			HandshakeTimeout.Add(1)
-			outcome = turnOutcomeTimeout
-			releasePermit()
-			return false, 0, &DTLSHandshakeTimeoutError{Endpoint: turnAddr, TurnURL: selectedURL, Err: err}
+		case turnOutcomeCanceled:
+			HandshakeCanceled.Add(1)
+		default:
+			HandshakeErrors.Add(1)
 		}
-		HandshakeErrors.Add(1)
-		outcome = turnOutcomeOther
 		releasePermit()
-		return false, 0, fmt.Errorf("DTLS_ERROR: сбой рукопожатия DTLS (relay=%s, gen=%d, hs=%v): %w", turnAddr, creds.Generation, hsDur.Round(time.Millisecond), err)
+		return false, 0, hsOut
 	}
 
 	outcome = turnOutcomeSuccess
